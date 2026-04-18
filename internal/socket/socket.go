@@ -72,6 +72,15 @@ func (c *PacketConn) ReadFrom(data []byte) (n int, addr net.Addr, err error) {
 		}
 		if payload == nil || raddr == nil {
 			// pcap timeout (or non-matching/partial packet). Keep waiting.
+			// Add a tiny backoff to avoid a tight spin in case the underlying
+			// capture handle returns immediately (driver behavior can vary).
+			sleep := 2 * time.Millisecond
+			if !d.IsZero() {
+				if rem := time.Until(d); rem > 0 && rem < sleep {
+					sleep = rem
+				}
+			}
+			time.Sleep(sleep)
 			continue
 		}
 

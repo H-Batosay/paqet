@@ -5,6 +5,8 @@ import (
 	"net"
 	"paqet/internal/flog"
 	"paqet/internal/pkg/buffer"
+	"sync"
+	"time"
 )
 
 func (f *Forward) listenTCP(ctx context.Context) error {
@@ -28,6 +30,7 @@ func (f *Forward) listenTCP(ctx context.Context) error {
 				return nil
 			default:
 				flog.Errorf("failed to accept TCP connection on %s: %v", f.listenAddr, err)
+				time.Sleep(50 * time.Millisecond)
 				continue
 			}
 		}
@@ -49,13 +52,17 @@ func (f *Forward) handleTCPConn(ctx context.Context, conn net.Conn) error {
 		flog.Errorf("failed to establish stream for %s -> %s: %v", conn.RemoteAddr(), f.targetAddr, err)
 		return err
 	}
-	defer func() {
-		flog.Debugf("TCP stream closed for %s -> %s", conn.RemoteAddr(), f.targetAddr)
-		defer strm.Close()
-	}()
 	flog.Infof("accepted TCP connection %s -> %s", conn.RemoteAddr(), f.targetAddr)
 
 	errCh := make(chan error, 2)
+	var closeOnce sync.Once
+	closeBoth := func() {
+		closeOnce.Do(func() {
+			_ = conn.Close()
+			_ = strm.Close()
+			flog.Debugf("TCP stream closed for %s -> %s", conn.RemoteAddr(), f.targetAddr)
+		})
+	}
 	go func() {
 		err := buffer.CopyT(conn, strm)
 		errCh <- err
@@ -67,11 +74,26 @@ func (f *Forward) handleTCPConn(ctx context.Context, conn net.Conn) error {
 
 	select {
 	case err := <-errCh:
+		closeBoth()
+		// Ensure the other copy goroutine exits too.
+		select {
+		case <-errCh:
+		case <-time.After(2 * time.Second):
+		}
 		if err != nil {
 			flog.Errorf("TCP stream %d failed for %s -> %s: %v", strm.SID(), conn.RemoteAddr(), f.targetAddr, err)
 			return err
 		}
 	case <-ctx.Done():
+		closeBoth()
+		select {
+		case <-errCh:
+			select {
+			case <-errCh:
+			case <-time.After(2 * time.Second):
+			}
+		case <-time.After(2 * time.Second):
+		}
 	}
 
 	return nil

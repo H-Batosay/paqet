@@ -7,6 +7,7 @@ import (
 	"os/signal"
 	"sync"
 	"syscall"
+	"time"
 
 	"paqet/internal/conf"
 	"paqet/internal/flog"
@@ -75,7 +76,13 @@ func (s *Server) listen(ctx context.Context, listener tnet.Listener) {
 		}
 		conn, err := listener.Accept()
 		if err != nil {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
 			flog.Errorf("failed to accept connection: %v", err)
+			time.Sleep(50 * time.Millisecond)
 			continue
 		}
 		flog.Infof("accepted new connection from %s (local: %s)", conn.RemoteAddr(), conn.LocalAddr())
