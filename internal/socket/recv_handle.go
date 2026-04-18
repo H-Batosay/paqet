@@ -1,6 +1,7 @@
 package socket
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"paqet/internal/conf"
@@ -39,6 +40,11 @@ func NewRecvHandle(cfg *conf.Network) (*RecvHandle, error) {
 func (h *RecvHandle) Read() ([]byte, net.Addr, error) {
 	data, _, err := h.handle.ReadPacketData()
 	if err != nil {
+		// With a finite pcap timeout, ReadPacketData periodically returns this error.
+		// Treat it as "no packet yet" so higher layers can check ctx/deadlines.
+		if errors.Is(err, pcap.NextErrorTimeoutExpired) || err == pcap.NextErrorTimeoutExpired {
+			return nil, nil, nil
+		}
 		return nil, nil, err
 	}
 	p := gopacket.NewPacket(data, layers.LayerTypeEthernet, gopacket.NoCopy)

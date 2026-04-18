@@ -82,6 +82,9 @@ func (s *Server) listen(ctx context.Context, listener tnet.Listener) {
 
 		s.wg.Go(func() {
 			defer conn.Close()
+			if s.pConn != nil {
+				defer s.pConn.ClearClientTCPF(conn.RemoteAddr())
+			}
 			s.handleConn(ctx, conn)
 		})
 	}

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"paqet/internal/conf"
 	"runtime"
+	"time"
 
 	"github.com/gopacket/gopacket/pcap"
 )
@@ -32,7 +33,9 @@ func newHandle(cfg *conf.Network) (*pcap.Handle, error) {
 	if err = inactive.SetPromisc(true); err != nil {
 		return nil, fmt.Errorf("failed to enable promiscuous mode: %v", err)
 	}
-	if err = inactive.SetTimeout(pcap.BlockForever); err != nil {
+	// IMPORTANT: Do not block forever. A finite timeout lets ReadPacketData wake up
+	// so callers can observe ctx cancellation / deadlines and exit cleanly.
+	if err = inactive.SetTimeout(100 * time.Millisecond); err != nil {
 		return nil, fmt.Errorf("failed to set pcap timeout: %v", err)
 	}
 	if err = inactive.SetImmediateMode(true); err != nil {

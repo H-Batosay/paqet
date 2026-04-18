@@ -51,29 +51,33 @@ func New(ctx context.Context, cfg *conf.Network) (*PacketConn, error) {
 }
 
 func (c *PacketConn) ReadFrom(data []byte) (n int, addr net.Addr, err error) {
-	var timer *time.Timer
-	var deadline <-chan time.Time
-	if d, ok := c.readDeadline.Load().(time.Time); ok && !d.IsZero() {
-		timer = time.NewTimer(time.Until(d))
-		defer timer.Stop()
-		deadline = timer.C
+	var d time.Time
+	if dd, ok := c.readDeadline.Load().(time.Time); ok {
+		d = dd
 	}
 
-	select {
-	case <-c.ctx.Done():
-		return 0, nil, c.ctx.Err()
-	case <-deadline:
-		return 0, nil, os.ErrDeadlineExceeded
-	default:
-	}
+	for {
+		select {
+		case <-c.ctx.Done():
+			return 0, nil, c.ctx.Err()
+		default:
+		}
+		if !d.IsZero() && time.Now().After(d) {
+			return 0, nil, os.ErrDeadlineExceeded
+		}
 
-	payload, addr, err := c.recvHandle.Read()
-	if err != nil {
-		return 0, nil, err
-	}
-	n = copy(data, payload)
+		payload, raddr, err := c.recvHandle.Read()
+		if err != nil {
+			return 0, nil, err
+		}
+		if payload == nil || raddr == nil {
+			// pcap timeout (or non-matching/partial packet). Keep waiting.
+			continue
+		}
 
-	return n, addr, nil
+		n = copy(data, payload)
+		return n, raddr, nil
+	}
 }
 
 func (c *PacketConn) WriteTo(data []byte, addr net.Addr) (n int, err error) {
@@ -110,10 +114,10 @@ func (c *PacketConn) Close() error {
 	c.cancel()
 
 	if c.sendHandle != nil {
-		go c.sendHandle.Close()
+		c.sendHandle.Close()
 	}
 	if c.recvHandle != nil {
-		go c.recvHandle.Close()
+		c.recvHandle.Close()
 	}
 
 	return nil
@@ -150,4 +154,10 @@ func (c *PacketConn) SetDSCP(dscp int) error {
 
 func (c *PacketConn) SetClientTCPF(addr net.Addr, f []conf.TCPF) {
 	c.sendHandle.setClientTCPF(addr, f)
+}
+
+func (c *PacketConn) ClearClientTCPF(addr net.Addr) {
+	if c.sendHandle != nil {
+		c.sendHandle.clearClientTCPF(addr)
+	}
 }
