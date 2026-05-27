@@ -95,6 +95,13 @@ func (c *PacketConn) recvLoop() {
 			continue
 		}
 
+		// SYN correlation: record the peer's SYN seq so the send handle can
+		// put peerSeq+1 in the ack field of the next SYN+ACK it sends.
+		// This makes S/SA look like a real TCP handshake to stateful firewalls.
+		if c.recvHandle.LastSYN() {
+			c.sendHandle.ObservePeerSYN(addr, c.recvHandle.LastSeq())
+		}
+
 		// ZeroCopy: payload points into pcap's ring buffer — must copy before
 		// calling Read() again.  Use a pooled buffer to avoid per-packet allocs.
 		var pkt recvPacket

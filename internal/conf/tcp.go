@@ -9,6 +9,11 @@ type TCP struct {
 	RF_ []string `yaml:"remote_flag"`
 	LF  []TCPF   `yaml:"-"`
 	RF  []TCPF   `yaml:"-"`
+	// ExplicitFlags is true when the user set local_flag or remote_flag in the
+	// config.  When false, paqet probes all well-known flag combos at startup
+	// and auto-switches on repeated failures.  When true it respects the user's
+	// choice and never switches to a different combination.
+	ExplicitFlags bool `yaml:"-"`
 }
 
 type TCPF struct {
@@ -16,6 +21,8 @@ type TCPF struct {
 }
 
 func (t *TCP) setDefaults() {
+	// Record whether the user provided flags before we fill in defaults.
+	t.ExplicitFlags = len(t.LF_) > 0 || len(t.RF_) > 0
 	if len(t.LF_) == 0 {
 		t.LF_ = []string{"PA"}
 	}

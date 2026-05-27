@@ -22,9 +22,11 @@ import (
 // packets to the same remote looks like a single, ongoing TCP stream rather
 // than a series of isolated bursts with large, unrelated sequence numbers.
 type connState struct {
-	mu  sync.Mutex
-	seq uint32 // next local sequence number to emit
-	ack uint32 // running acknowledgement value (simulates remote side sending)
+	mu      sync.Mutex
+	seq     uint32 // next local sequence number to emit
+	ack     uint32 // running acknowledgement value (simulates remote side sending)
+	peerSeq uint32 // latest SYN seq observed in packets FROM this peer
+	hasPeer bool   // whether peerSeq has been set at least once
 }
 
 type TCPF struct {
@@ -119,6 +121,22 @@ func (h *SendHandle) getOrCreateConnState(key uint64) *connState {
 	h.connStates[key] = cs
 	h.connStatesMu.Unlock()
 	return cs
+}
+
+// ObservePeerSYN records the SYN sequence number from an incoming packet
+// sent by addr.  When the next SA (SYN+ACK) is sent to that addr, the ack
+// field will be set to peerSeq+1 — exactly what a real TCP SYN-ACK carries.
+// Call this from recvLoop whenever an inbound SYN is decoded.
+func (h *SendHandle) ObservePeerSYN(addr net.Addr, seq uint32) {
+	a, ok := addr.(*net.UDPAddr)
+	if !ok || a == nil {
+		return
+	}
+	cs := h.getOrCreateConnState(hash.IPAddr(a.IP, uint16(a.Port)))
+	cs.mu.Lock()
+	cs.peerSeq = seq
+	cs.hasPeer = true
+	cs.mu.Unlock()
 }
 
 func (h *SendHandle) buildIPv4Header(dstIP net.IP) *layers.IPv4 {
@@ -223,6 +241,12 @@ func (h *SendHandle) Write(payload []byte, addr *net.UDPAddr) error {
 	cs.mu.Lock()
 	seq := cs.seq
 	ack := cs.ack
+	// SYN+ACK (SA): the ack must equal the peer's SYN seq + 1 so stateful
+	// firewalls accept the handshake.  Use the seq we observed from the last
+	// inbound SYN packet if available; fall back to the running estimate.
+	if f.SYN && f.ACK && cs.hasPeer {
+		ack = cs.peerSeq + 1
+	}
 	cs.seq += advance
 	// Advance the fake remote side proportionally so ACK numbers look
 	// realistic relative to the byte counts in both directions.

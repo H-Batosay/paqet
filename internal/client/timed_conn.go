@@ -39,11 +39,16 @@ func newTimedConn(ctx context.Context, cfg *conf.Conf) (*timedConn, error) {
 	tc := &timedConn{
 		cfg:    cfg,
 		ctx:    ctx,
-		cycler: newFlagCycler(cfg.Network.TCP.LF, cfg.Network.TCP.RF),
+		cycler: newFlagCycler(cfg.Network.TCP.LF, cfg.Network.TCP.RF, cfg.Network.TCP.ExplicitFlags),
 	}
 
 	n := tc.cycler.Len()
-	flog.Infof("startup probe: testing %d flag combo(s) against %s (2s each)", n, cfg.Server.Addr)
+	if cfg.Network.TCP.ExplicitFlags {
+		lfStr, rfStr := tc.cycler.ActiveStrings()
+		flog.Infof("startup: connecting with configured flags LF=%s RF=%s (no auto-switch)", lfStr, rfStr)
+	} else {
+		flog.Infof("startup probe: testing %d flag combo(s) against %s (2s each)", n, cfg.Server.Addr)
+	}
 
 	// Phase 1 — find a combo that passes the bidirectional check.
 	for i := 0; i < n; i++ {

@@ -143,6 +143,14 @@ func (h *RecvHandle) Read() ([]byte, net.Addr, error) {
 	return h.tcp.Payload, addr, nil
 }
 
+// LastSeq returns the TCP sequence number of the most recently decoded packet.
+// Only valid immediately after Read() returns a non-nil payload.
+func (h *RecvHandle) LastSeq() uint32 { return h.tcp.Seq }
+
+// LastSYN reports whether the most recently decoded packet had the SYN flag set.
+// Only valid immediately after Read() returns a non-nil payload.
+func (h *RecvHandle) LastSYN() bool { return h.tcp.SYN }
+
 func (h *RecvHandle) Close() {
 	if h.handle != nil {
 		h.handle.Close()

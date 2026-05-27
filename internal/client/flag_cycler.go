@@ -40,17 +40,26 @@ type flagCycler struct {
 }
 
 // newFlagCycler returns a cycler whose first entry is the user-configured
-// combo (lf/rf).  All fallbackCombos follow, skipping any duplicate.
-func newFlagCycler(lf, rf []conf.TCPF) *flagCycler {
+// combo (lf/rf).
+//
+// explicit=true (user set local_flag/remote_flag in the config): only that
+// combo is ever used — no fallback cycling.  The user has made an intentional
+// choice; paqet honours it and never switches to another combination.
+//
+// explicit=false (no flags in config, defaults applied): all fallbackCombos
+// are appended after the default so paqet can probe and auto-switch.
+func newFlagCycler(lf, rf []conf.TCPF, explicit bool) *flagCycler {
 	userLF := tcpfToStr(lf)
 	userRF := tcpfToStr(rf)
 
 	combos := []flagPair{{userLF, userRF}}
-	for _, c := range fallbackCombos {
-		if c.lf == userLF && c.rf == userRF {
-			continue // already covered by the user combo
+	if !explicit {
+		for _, c := range fallbackCombos {
+			if c.lf == userLF && c.rf == userRF {
+				continue // already covered by the user combo
+			}
+			combos = append(combos, c)
 		}
-		combos = append(combos, c)
 	}
 	return &flagCycler{combos: combos}
 }
