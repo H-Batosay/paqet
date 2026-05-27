@@ -54,7 +54,7 @@ func newTimedConn(ctx context.Context, cfg *conf.Conf) (*timedConn, error) {
 		lfStr, rfStr := tc.cycler.ActiveStrings()
 		flog.Infof("startup: connecting with configured flags LF=%s RF=%s (no auto-switch)", lfStr, rfStr)
 	} else {
-		flog.Infof("startup probe: testing %d flag combo(s) against %s (2s each)", n, cfg.Server.Addr)
+		flog.Infof("startup probe: testing %d flag combo(s) against %s (5s each)", n, cfg.Server.Addr)
 	}
 
 	// Phase 1 — find a combo that passes the bidirectional check.
@@ -69,7 +69,7 @@ func newTimedConn(ctx context.Context, cfg *conf.Conf) (*timedConn, error) {
 			continue
 		}
 
-		if err = tc.verifyBidirectional(conn, lfStr, rfStr, 2*time.Second); err == nil {
+		if err = tc.verifyBidirectional(conn, lfStr, rfStr, 5*time.Second); err == nil {
 			flog.Infof("startup probe: working combo found — LF=%s RF=%s", lfStr, rfStr)
 			tc.conn = conn
 			tc.startHealthCheck()
