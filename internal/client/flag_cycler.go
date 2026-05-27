@@ -104,6 +104,33 @@ func (fc *flagCycler) Failures() int {
 	return fc.failures
 }
 
+// Len returns the total number of flag combinations in the rotation.
+func (fc *flagCycler) Len() int {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+	return len(fc.combos)
+}
+
+// ForceNext advances to the next combo immediately, without incrementing the
+// failure counter.  Used by the startup probe to sweep all combos quickly.
+func (fc *flagCycler) ForceNext() {
+	fc.mu.Lock()
+	fc.idx = (fc.idx + 1) % len(fc.combos)
+	fc.failures = 0
+	fc.mu.Unlock()
+}
+
+// SetIdx sets the active combo by index and resets the failure counter.
+// Used by the startup probe to restore the best combo found.
+func (fc *flagCycler) SetIdx(i int) {
+	fc.mu.Lock()
+	if i >= 0 && i < len(fc.combos) {
+		fc.idx = i
+		fc.failures = 0
+	}
+	fc.mu.Unlock()
+}
+
 // parseFlagStr converts a string like "PA" into a single-element []conf.TCPF.
 func parseFlagStr(s string) []conf.TCPF {
 	var f conf.TCPF

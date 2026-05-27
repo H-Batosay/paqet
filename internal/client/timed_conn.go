@@ -24,23 +24,70 @@ type timedConn struct {
 	cycler *flagCycler // auto flag-switching on repeated connection failures
 }
 
+// newTimedConn creates a timedConn and establishes the first KCP connection.
+//
+// Startup probe strategy:
+//  1. Try every flag combo in the cycler with a short (2 s) bidirectional ping.
+//     First combo that passes → use it and return.
+//  2. If ALL combos fail the ping (server→client path blocked — usually the
+//     client-init.sh RST-DROP rule is missing) → fall back to connecting
+//     WITHOUT ping verification so the process stays alive.  A clear warning
+//     is logged pointing to the fix.
+//  3. Hard-fail only if the server is truly unreachable (KCP dial fails on
+//     every combo).
 func newTimedConn(ctx context.Context, cfg *conf.Conf) (*timedConn, error) {
-	tc := timedConn{
+	tc := &timedConn{
 		cfg:    cfg,
 		ctx:    ctx,
 		cycler: newFlagCycler(cfg.Network.TCP.LF, cfg.Network.TCP.RF),
 	}
-	var err error
-	tc.conn, err = tc.createConn()
-	if err != nil {
-		return nil, err
+
+	n := tc.cycler.Len()
+	flog.Infof("startup probe: testing %d flag combo(s) against %s (2s each)", n, cfg.Server.Addr)
+
+	// Phase 1 — find a combo that passes the bidirectional check.
+	for i := 0; i < n; i++ {
+		lfStr, rfStr := tc.cycler.ActiveStrings()
+		flog.Debugf("  probe [%d/%d] LF=%s RF=%s", i+1, n, lfStr, rfStr)
+
+		conn, err := tc.dialKCPOnly()
+		if err != nil {
+			flog.Debugf("  probe [%d/%d] KCP dial failed: %v", i+1, n, err)
+			tc.cycler.ForceNext()
+			continue
+		}
+
+		if err = tc.verifyBidirectional(conn, lfStr, rfStr, 2*time.Second); err == nil {
+			flog.Infof("startup probe: working combo found — LF=%s RF=%s", lfStr, rfStr)
+			tc.conn = conn
+			return tc, nil
+		}
+		conn.Close()
+		tc.cycler.ForceNext()
 	}
-	return &tc, nil
+
+	// Phase 2 — no combo passed ping.  Reset to combo 0 and start without
+	// ping verification.  The connection will work once client-init.sh is run.
+	tc.cycler.SetIdx(0)
+	lfStr, rfStr := tc.cycler.ActiveStrings()
+
+	flog.Warnf("startup probe: all %d flag combo(s) failed bidirectional check", n)
+	flog.Warnf("  → server→client packets are likely blocked by your OS/NAT sending RST")
+	flog.Warnf("  → FIX: sudo bash scripts/client-init.sh %s", cfg.Server.Addr)
+	flog.Warnf("  → starting anyway with LF=%s RF=%s — will work once the rule is applied", lfStr, rfStr)
+
+	conn, err := tc.dialKCPOnly()
+	if err != nil {
+		return nil, fmt.Errorf("server unreachable at %s: %w", cfg.Server.Addr, err)
+	}
+	tc.conn = conn
+	return tc, nil
 }
 
+// createConn dials a fresh KCP session using the cycler's current active flags
+// and verifies bidirectional connectivity before returning.
+// Used for all reconnect attempts after startup.
 func (tc *timedConn) createConn() (tnet.Conn, error) {
-	// Use the cycler's active flags — these may differ from cfg defaults after
-	// an automatic flag switch triggered by repeated connection failures.
 	activeLF, activeRF := tc.cycler.Active()
 	lfStr, rfStr := tc.cycler.ActiveStrings()
 	flog.Infof("dialing server %s (LF=%s RF=%s)", tc.cfg.Server.Addr, lfStr, rfStr)
@@ -57,7 +104,7 @@ func (tc *timedConn) createConn() (tnet.Conn, error) {
 
 	conn, err := kcp.Dial(tc.cfg.Server.Addr, tc.cfg.Transport.KCP, pConn)
 	if err != nil {
-		pConn.Close() // Dial failed before taking ownership of pConn
+		pConn.Close()
 		return nil, fmt.Errorf("KCP dial failed: %w", err)
 	}
 
@@ -66,12 +113,7 @@ func (tc *timedConn) createConn() (tnet.Conn, error) {
 		return nil, fmt.Errorf("TCPF handshake failed: %w", err)
 	}
 
-	// Verify that data flows in BOTH directions before declaring success.
-	// A ping sends a KCP frame TO the server and expects a PONG back.
-	// If only client→server works (e.g. firewall drops reverse traffic),
-	// the ping times out and createConn returns an error — the flagCycler
-	// then advances to the next combo after maxFlagFailures attempts.
-	if err = tc.verifyBidirectional(conn, lfStr, rfStr); err != nil {
+	if err = tc.verifyBidirectional(conn, lfStr, rfStr, 5*time.Second); err != nil {
 		conn.Close()
 		return nil, err
 	}
@@ -80,13 +122,41 @@ func (tc *timedConn) createConn() (tnet.Conn, error) {
 	return conn, nil
 }
 
-// verifyBidirectional sends a ping and waits for the pong with a 5-second
-// deadline.  A timeout means the server→client path is blocked.
-func (tc *timedConn) verifyBidirectional(conn tnet.Conn, lfStr, rfStr string) error {
-	const pingTimeout = 5 * time.Second
-	flog.Debugf("verifying bidirectional connectivity (LF=%s RF=%s, timeout %s)", lfStr, rfStr, pingTimeout)
+// dialKCPOnly establishes a KCP connection and sends the TCPF handshake but
+// does NOT run the bidirectional ping check.  Used by the startup probe and
+// as a last-resort fallback when ping verification fails on all combos.
+func (tc *timedConn) dialKCPOnly() (tnet.Conn, error) {
+	activeLF, activeRF := tc.cycler.Active()
 
-	if err := conn.SetDeadline(time.Now().Add(pingTimeout)); err != nil {
+	netCfg := tc.cfg.Network
+	netCfg.TCP.LF = activeLF
+	netCfg.TCP.RF = activeRF
+
+	pConn, err := socket.New(tc.ctx, &netCfg)
+	if err != nil {
+		return nil, fmt.Errorf("could not create packet conn: %w", err)
+	}
+
+	conn, err := kcp.Dial(tc.cfg.Server.Addr, tc.cfg.Transport.KCP, pConn)
+	if err != nil {
+		pConn.Close()
+		return nil, fmt.Errorf("KCP dial failed: %w", err)
+	}
+
+	if err = tc.sendTCPF(conn, activeRF); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("TCPF handshake failed: %w", err)
+	}
+
+	return conn, nil
+}
+
+// verifyBidirectional sends a ping and waits for the pong within timeout.
+// A timeout indicates the server→client path is blocked.
+func (tc *timedConn) verifyBidirectional(conn tnet.Conn, lfStr, rfStr string, timeout time.Duration) error {
+	flog.Debugf("verifying bidirectional connectivity (LF=%s RF=%s, timeout %s)", lfStr, rfStr, timeout)
+
+	if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
 		return fmt.Errorf("could not set ping deadline: %w", err)
 	}
 	err := conn.Ping(true)
