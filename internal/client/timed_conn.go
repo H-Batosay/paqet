@@ -27,8 +27,10 @@ type timedConn struct {
 // newTimedConn creates a timedConn and establishes the first KCP connection.
 //
 // Startup probe strategy:
-//  1. Try every flag combo in the cycler with a short (2 s) bidirectional ping.
-//     First combo that passes both-way connectivity → use it and return.
+//  1. Try every flag combo in the cycler.  For each combo send PPING and retry
+//     every ~1.5 s within the probe_timeout window (default 8 s).  This tolerates
+//     the initial KCP/smux goroutine startup delay and transient packet loss.
+//     First combo that receives a PPONG → use it and return.
 //  2. If ALL combos fail the ping (server→client path blocked — usually the
 //     client-init.sh RST-DROP rule is missing) → fall back to connecting
 //     WITHOUT ping verification so the process stays alive.  A clear warning
@@ -49,12 +51,15 @@ func newTimedConn(ctx context.Context, cfg *conf.Conf) (*timedConn, error) {
 		),
 	}
 
+	probeTimeout := cfg.Network.TCP.ProbeTimeout
+
 	n := tc.cycler.Len()
 	if cfg.Network.TCP.ExplicitFlags {
 		lfStr, rfStr := tc.cycler.ActiveStrings()
 		flog.Infof("startup: connecting with configured flags LF=%s RF=%s (no auto-switch)", lfStr, rfStr)
 	} else {
-		flog.Infof("startup probe: testing %d flag combo(s) against %s (5s each)", n, cfg.Server.Addr)
+		flog.Infof("startup probe: testing %d flag combo(s) against %s (%ds each, retry every 1.5s)",
+			n, cfg.Server.Addr, int(probeTimeout.Seconds()))
 	}
 
 	// Phase 1 — find a combo that passes the bidirectional check.
@@ -69,7 +74,7 @@ func newTimedConn(ctx context.Context, cfg *conf.Conf) (*timedConn, error) {
 			continue
 		}
 
-		if err = tc.verifyBidirectional(conn, lfStr, rfStr, 5*time.Second); err == nil {
+		if err = tc.verifyBidirectional(conn, lfStr, rfStr, probeTimeout); err == nil {
 			flog.Infof("startup probe: working combo found — LF=%s RF=%s", lfStr, rfStr)
 			tc.conn = conn
 			tc.startHealthCheck()
@@ -127,7 +132,7 @@ func (tc *timedConn) createConn() (tnet.Conn, error) {
 		return nil, fmt.Errorf("TCPF handshake failed: %w", err)
 	}
 
-	if err = tc.verifyBidirectional(conn, lfStr, rfStr, 5*time.Second); err != nil {
+	if err = tc.verifyBidirectional(conn, lfStr, rfStr, tc.cfg.Network.TCP.ProbeTimeout); err != nil {
 		conn.Close()
 		return nil, err
 	}
@@ -165,24 +170,63 @@ func (tc *timedConn) dialKCPOnly() (tnet.Conn, error) {
 	return conn, nil
 }
 
-// verifyBidirectional sends a ping and waits for the pong within timeout.
-// A timeout indicates the server→client path is blocked.
+// verifyBidirectional retries PPING within the overall timeout window.
 //
-// The deadline is set on the individual smux stream, not on the session —
-// smux.Session.SetDeadline does NOT propagate to stream read/write, so
-// setting it on the session would have no effect on Ping's read call.
+// Each individual attempt uses a short sub-deadline (~1.5 s).  Retrying
+// handles two common failure modes on fresh KCP connections:
+//
+//  1. The very first KCP/smux packet is dropped (common before the KCP
+//     session is acknowledged).  A retry picks up where the lost packet left
+//     off once KCP has retransmitted and the session is stable.
+//
+//  2. The smux/KCP goroutines haven't been scheduled by the Go runtime yet
+//     when the first PPING is sent.  The second attempt benefits from goroutines
+//     that are now running and the KCP send window being properly established.
+//
+// A timeout on the overall window (all attempts exhausted) indicates the
+// server→client path is genuinely blocked (e.g. client-init.sh not applied).
 func (tc *timedConn) verifyBidirectional(conn tnet.Conn, lfStr, rfStr string, timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
+	const attemptDur = 1500 * time.Millisecond
+
+	overall := time.Now().Add(timeout)
+	attempt := 0
+
 	flog.Debugf("verifying bidirectional connectivity (LF=%s RF=%s, timeout %s)", lfStr, rfStr, timeout)
 
-	err := conn.Ping(true, deadline)
-	if err != nil {
-		flog.Warnf("bidirectional check failed (LF=%s RF=%s): server→client path may be blocked — %v", lfStr, rfStr, err)
-		return fmt.Errorf("ping timeout with LF=%s RF=%s (server→client blocked?): %w", lfStr, rfStr, err)
+	for time.Now().Before(overall) {
+		attempt++
+		remaining := time.Until(overall)
+		if remaining <= 0 {
+			break
+		}
+		t := attemptDur
+		if remaining < t {
+			t = remaining
+		}
+
+		deadline := time.Now().Add(t)
+		err := conn.Ping(true, deadline)
+		if err == nil {
+			flog.Debugf("bidirectional OK (LF=%s RF=%s, attempt %d/%d)", lfStr, rfStr, attempt, maxAttempts(timeout, attemptDur))
+			return nil
+		}
+		flog.Debugf("ping attempt %d failed (LF=%s RF=%s): %v — retrying", attempt, lfStr, rfStr, err)
 	}
 
-	flog.Debugf("bidirectional OK (LF=%s RF=%s)", lfStr, rfStr)
-	return nil
+	flog.Warnf("bidirectional check failed (LF=%s RF=%s): server→client path may be blocked after %d attempt(s)", lfStr, rfStr, attempt)
+	return fmt.Errorf("ping timed out (LF=%s RF=%s, %d attempt(s)): server→client blocked?", lfStr, rfStr, attempt)
+}
+
+// maxAttempts returns the expected number of PPING attempts within timeout.
+func maxAttempts(timeout, attempt time.Duration) int {
+	if attempt <= 0 {
+		return 1
+	}
+	n := int(timeout / attempt)
+	if n < 1 {
+		return 1
+	}
+	return n
 }
 
 // startHealthCheck launches a background goroutine that periodically pings

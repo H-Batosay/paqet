@@ -54,7 +54,11 @@ socks5:
 #     local_flag:  ["PA"]        # Flags for client → server packets (default: PA)
 #     remote_flag: ["PA"]        # Flags the server puts on server → client packets
 #
-#     # Auto-switch tuning (only relevant when local_flag/remote_flag are NOT set)
+#     # Startup probe and auto-switch tuning
+#     probe_timeout: 8           # Seconds per flag combo during startup probe.
+#                                # PPING is retried every ~1.5 s within this window
+#                                # so transient packet loss does not cause false failure.
+#                                # Increase on high-latency paths (default: 8; minimum: 2)
 #     max_failures: 3            # Consecutive failures before switching to next combo
 #                                # (default: 3; minimum: 1)
 #     health_interval: 30        # Seconds between background ping health-checks

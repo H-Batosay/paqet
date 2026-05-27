@@ -290,9 +290,14 @@ dig @127.0.0.1 -p 5353 example.com
 ```yaml
 network:
   tcp:
+    probe_timeout: 8     # total seconds per flag combo during startup probe (default: 8, min: 2)
+                         # PPING is retried every ~1.5 s within this window — increase on
+                         # high-latency paths where KCP takes longer to establish
     max_failures: 3      # failures before switching to next combo (default: 3, min: 1)
     health_interval: 30  # seconds between background pings (default: 30; -1 = disabled)
 ```
+
+**`probe_timeout`** controls how long paqet spends testing each flag combination at startup. Within that window it retries PPING every ~1.5 s, so a single dropped packet (common during KCP session initialisation) does not cause a false failure. If all 19 probes still fail (you see "all N flag combos failed bidirectional check") but SOCKS/forwarding works immediately afterwards, the probe timeout is too short or `client-init.sh` needs to be applied.
 
 Reduce `max_failures` to `1` for aggressive probing (switches immediately on any failure). Set `health_interval: -1` to disable the health-check goroutine entirely (relies on traffic-path failures alone to drive switching).
 

@@ -27,6 +27,13 @@ type TCP struct {
 	// Default: 30.  Set to -1 to disable health checks.
 	HealthInterval_  int           `yaml:"health_interval"`
 	HealthInterval   time.Duration `yaml:"-"`
+
+	// ProbeTimeout is the total time (seconds) allowed per flag combo during
+	// the startup probe.  Within this window the probe retries PPING every
+	// ~1.5 s so transient KCP/smux startup packet loss does not cause a false
+	// failure.  Default: 8.  Minimum: 2.
+	ProbeTimeout_  int           `yaml:"probe_timeout"`
+	ProbeTimeout   time.Duration `yaml:"-"`
 }
 
 type TCPF struct {
@@ -47,6 +54,9 @@ func (t *TCP) setDefaults() {
 	}
 	if t.HealthInterval_ == 0 {
 		t.HealthInterval_ = 30 // default: check every 30 s
+	}
+	if t.ProbeTimeout_ == 0 {
+		t.ProbeTimeout_ = 8 // default: 8 s per combo (3 × 1.5 s attempts + overhead)
 	}
 }
 
@@ -87,6 +97,11 @@ func (t *TCP) validate() []error {
 	if t.HealthInterval_ > 0 {
 		t.HealthInterval = time.Duration(t.HealthInterval_) * time.Second
 	}
+
+	if t.ProbeTimeout_ < 2 {
+		errors = append(errors, fmt.Errorf("probe_timeout must be >= 2 seconds"))
+	}
+	t.ProbeTimeout = time.Duration(t.ProbeTimeout_) * time.Second
 
 	return errors
 }
