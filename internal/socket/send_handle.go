@@ -3,6 +3,7 @@ package socket
 import (
 	"encoding/binary"
 	"fmt"
+	"math/rand"
 	"net"
 	"paqet/internal/conf"
 	"paqet/internal/pkg/hash"
@@ -17,6 +18,15 @@ import (
 	"github.com/gopacket/gopacket/pcap"
 )
 
+// connState tracks per-destination TCP sequence state so every burst of
+// packets to the same remote looks like a single, ongoing TCP stream rather
+// than a series of isolated bursts with large, unrelated sequence numbers.
+type connState struct {
+	mu  sync.Mutex
+	seq uint32 // next local sequence number to emit
+	ack uint32 // running acknowledgement value (simulates remote side sending)
+}
+
 type TCPF struct {
 	tcpF       iterator.Iterator[conf.TCPF]
 	clientTCPF map[uint64]*iterator.Iterator[conf.TCPF]
@@ -30,14 +40,18 @@ type SendHandle struct {
 	srcIPv6     net.IP
 	srcIPv6RHWA net.HardwareAddr
 	srcPort     uint16
-	time        uint32
-	tsCounter   uint32
+	startMs     uint32        // epoch ms at handle creation — timestamp base
+	tsCounter   atomic.Uint32 // monotonic ms counter (global across all dsts)
 	tcpF        TCPF
-	ethPool     sync.Pool
-	ipv4Pool    sync.Pool
-	ipv6Pool    sync.Pool
-	tcpPool     sync.Pool
-	bufPool     sync.Pool
+
+	connStates   map[uint64]*connState
+	connStatesMu sync.RWMutex
+
+	ethPool  sync.Pool
+	ipv4Pool sync.Pool
+	ipv6Pool sync.Pool
+	tcpPool  sync.Pool
+	bufPool  sync.Pool
 }
 
 func NewSendHandle(cfg *conf.Network) (*SendHandle, error) {
@@ -56,33 +70,21 @@ func NewSendHandle(cfg *conf.Network) (*SendHandle, error) {
 	sh := &SendHandle{
 		handle:  handle,
 		srcPort: uint16(cfg.Port),
-		tcpF:    TCPF{tcpF: iterator.Iterator[conf.TCPF]{Items: cfg.TCP.LF}, clientTCPF: make(map[uint64]*iterator.Iterator[conf.TCPF])},
-		time:    uint32(time.Now().UnixNano() / int64(time.Millisecond)),
+		startMs: uint32(time.Now().UnixNano() / int64(time.Millisecond)),
+		tcpF: TCPF{
+			tcpF:       iterator.Iterator[conf.TCPF]{Items: cfg.TCP.LF},
+			clientTCPF: make(map[uint64]*iterator.Iterator[conf.TCPF]),
+		},
+		connStates: make(map[uint64]*connState),
 		ethPool: sync.Pool{
 			New: func() any {
 				return &layers.Ethernet{SrcMAC: cfg.Interface.HardwareAddr}
 			},
 		},
-		ipv4Pool: sync.Pool{
-			New: func() any {
-				return &layers.IPv4{}
-			},
-		},
-		ipv6Pool: sync.Pool{
-			New: func() any {
-				return &layers.IPv6{}
-			},
-		},
-		tcpPool: sync.Pool{
-			New: func() any {
-				return &layers.TCP{}
-			},
-		},
-		bufPool: sync.Pool{
-			New: func() any {
-				return gopacket.NewSerializeBuffer()
-			},
-		},
+		ipv4Pool: sync.Pool{New: func() any { return &layers.IPv4{} }},
+		ipv6Pool: sync.Pool{New: func() any { return &layers.IPv6{} }},
+		tcpPool:  sync.Pool{New: func() any { return &layers.TCP{} }},
+		bufPool:  sync.Pool{New: func() any { return gopacket.NewSerializeBuffer() }},
 	}
 	if cfg.IPv4.Addr != nil {
 		sh.srcIPv4 = cfg.IPv4.Addr.IP
@@ -93,6 +95,30 @@ func NewSendHandle(cfg *conf.Network) (*SendHandle, error) {
 		sh.srcIPv6RHWA = cfg.IPv6.Router
 	}
 	return sh, nil
+}
+
+// getOrCreateConnState returns the per-destination TCP sequence tracker,
+// creating one with a random ISN if this is the first packet to that host.
+func (h *SendHandle) getOrCreateConnState(key uint64) *connState {
+	h.connStatesMu.RLock()
+	cs := h.connStates[key]
+	h.connStatesMu.RUnlock()
+	if cs != nil {
+		return cs
+	}
+
+	cs = &connState{
+		seq: rand.Uint32(),
+		ack: rand.Uint32(),
+	}
+	h.connStatesMu.Lock()
+	if existing := h.connStates[key]; existing != nil {
+		h.connStatesMu.Unlock()
+		return existing
+	}
+	h.connStates[key] = cs
+	h.connStatesMu.Unlock()
+	return cs
 }
 
 func (h *SendHandle) buildIPv4Header(dstIP net.IP) *layers.IPv4 {
@@ -123,46 +149,51 @@ func (h *SendHandle) buildIPv6Header(dstIP net.IP) *layers.IPv6 {
 	return ip
 }
 
-func (h *SendHandle) buildTCPHeader(dstPort uint16, f conf.TCPF) *layers.TCP {
+// buildTCPHeader constructs a TCP layer with realistic sequence/ack/timestamp
+// fields.  seq and ack come from per-destination connState so they advance
+// monotonically like a real stream.  tsVal is a global monotonic ms counter;
+// tsEcr simulates a recent peer timestamp (tsVal minus a plausible RTT).
+func (h *SendHandle) buildTCPHeader(dstPort uint16, f conf.TCPF, seq, ack, tsVal, tsEcr uint32) *layers.TCP {
 	tcp := h.tcpPool.Get().(*layers.TCP)
 	*tcp = layers.TCP{
 		SrcPort: layers.TCPPort(h.srcPort),
 		DstPort: layers.TCPPort(dstPort),
-		FIN:     f.FIN, SYN: f.SYN, RST: f.RST, PSH: f.PSH, ACK: f.ACK, URG: f.URG, ECE: f.ECE, CWR: f.CWR, NS: f.NS,
+		FIN:     f.FIN, SYN: f.SYN, RST: f.RST, PSH: f.PSH, ACK: f.ACK,
+		URG: f.URG, ECE: f.ECE, CWR: f.CWR, NS: f.NS,
 		Window: 65535,
+		Seq:    seq,
+		Ack:    ack,
 	}
 
-	counter := atomic.AddUint32(&h.tsCounter, 1)
-	tsVal := h.time + (counter >> 3)
 	if f.SYN {
+		// Full SYN options: MSS + SACK-permitted + timestamps + NOP + window-scale.
+		// This matches what a Linux kernel sends and passes the most strict DPI.
 		tcp.Options = []layers.TCPOption{
-			{OptionType: layers.TCPOptionKindMSS, OptionLength: 4, OptionData: []byte{0x05, 0xb4}},
+			{OptionType: layers.TCPOptionKindMSS, OptionLength: 4, OptionData: []byte{0x05, 0xb4}}, // MSS 1460
 			{OptionType: layers.TCPOptionKindSACKPermitted, OptionLength: 2},
 			{OptionType: layers.TCPOptionKindTimestamps, OptionLength: 10, OptionData: make([]byte, 8)},
 			{OptionType: layers.TCPOptionKindNop},
-			{OptionType: layers.TCPOptionKindWindowScale, OptionLength: 3, OptionData: []byte{8}},
+			{OptionType: layers.TCPOptionKindWindowScale, OptionLength: 3, OptionData: []byte{7}},
 		}
 		binary.BigEndian.PutUint32(tcp.Options[2].OptionData[0:4], tsVal)
-		binary.BigEndian.PutUint32(tcp.Options[2].OptionData[4:8], 0)
-		tcp.Seq = 1 + (counter & 0x7)
-		tcp.Ack = 0
-		if f.ACK {
-			tcp.Ack = tcp.Seq + 1
+		ecr := tsEcr
+		if !f.ACK {
+			ecr = 0 // pure SYN carries no echo
+		}
+		binary.BigEndian.PutUint32(tcp.Options[2].OptionData[4:8], ecr)
+		if !f.ACK {
+			tcp.Ack = 0
 		}
 	} else {
+		// Standard NOP+NOP+timestamps used by established connections.
 		tcp.Options = []layers.TCPOption{
 			{OptionType: layers.TCPOptionKindNop},
 			{OptionType: layers.TCPOptionKindNop},
 			{OptionType: layers.TCPOptionKindTimestamps, OptionLength: 10, OptionData: make([]byte, 8)},
 		}
-		tsEcr := tsVal - (counter%200 + 50)
 		binary.BigEndian.PutUint32(tcp.Options[2].OptionData[0:4], tsVal)
 		binary.BigEndian.PutUint32(tcp.Options[2].OptionData[4:8], tsEcr)
-		seq := h.time + (counter << 7)
-		tcp.Seq = seq
-		tcp.Ack = seq - (counter & 0x3FF) + 1400
 	}
-
 	return tcp
 }
 
@@ -177,9 +208,33 @@ func (h *SendHandle) Write(payload []byte, addr *net.UDPAddr) error {
 
 	dstIP := addr.IP
 	dstPort := uint16(addr.Port)
+	key := hash.IPAddr(dstIP, dstPort)
 
 	f := h.getClientTCPF(dstIP, dstPort)
-	tcpLayer := h.buildTCPHeader(dstPort, f)
+	cs := h.getOrCreateConnState(key)
+
+	// Compute how many bytes this packet "consumes" in the sequence space.
+	// SYN and FIN each consume 1; data packets consume len(payload).
+	advance := uint32(len(payload))
+	if advance == 0 || f.SYN || f.FIN {
+		advance = 1
+	}
+
+	cs.mu.Lock()
+	seq := cs.seq
+	ack := cs.ack
+	cs.seq += advance
+	// Advance the fake remote side proportionally so ACK numbers look
+	// realistic relative to the byte counts in both directions.
+	cs.ack += advance/2 + 1
+	cs.mu.Unlock()
+
+	// Monotonic ms timestamp, globally unique across all destinations.
+	tsVal := h.startMs + h.tsCounter.Add(1)
+	// Echo a plausible peer timestamp: simulate ~100 ms RTT.
+	tsEcr := tsVal - 100
+
+	tcpLayer := h.buildTCPHeader(dstPort, f, seq, ack, tsVal, tsEcr)
 	defer h.tcpPool.Put(tcpLayer)
 
 	var ipLayer gopacket.SerializableLayer
@@ -231,6 +286,11 @@ func (h *SendHandle) clearClientTCPF(addr net.Addr) {
 	h.tcpF.mu.Lock()
 	delete(h.tcpF.clientTCPF, k)
 	h.tcpF.mu.Unlock()
+	// Also remove the per-destination connState so the map doesn't grow
+	// indefinitely on the server (one entry per disconnected client).
+	h.connStatesMu.Lock()
+	delete(h.connStates, k)
+	h.connStatesMu.Unlock()
 }
 
 func (h *SendHandle) Close() {

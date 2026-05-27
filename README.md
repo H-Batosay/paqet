@@ -47,6 +47,17 @@ This script:
 - Optionally installs `libpcap` if missing (for self-compiled builds)
 - Optionally persists the rules across reboots
 
+### 3b. Client Setup (Linux only, recommended)
+
+```bash
+# On your Linux client machine (requires root):
+sudo bash scripts/client-init.sh YOUR_SERVER_IP 9999
+```
+
+**Why this matters:** paqet bypasses the OS TCP stack entirely using raw sockets. When the server sends packets back, the client's kernel sees TCP frames with no matching socket and immediately sends RST. Stateful NAT routers and firewalls see this RST and tear down the NAT entry, blocking all subsequent server→client traffic — the symptom is a tunnel that "connects" but never delivers responses. This script drops the RST before it leaves the machine.
+
+Without this rule, paqet still works on many networks (home NATs often ignore RST for short-lived mappings), but it is the first fix to try if you see `responses not received`.
+
 ### 4. Configure
 
 Network settings (interface, IP, router MAC) are **auto-detected** from the routing table. You only need to set the essentials:
@@ -81,8 +92,9 @@ Generate a secure key with: `./paqet secret`
 
 Some networks block or modify certain TCP flag patterns. `paqet` handles this at two levels:
 
-**Runtime auto-switching** (no config needed): if a flag combination stops working during a live session, the client automatically tries the next well-known combination after 3 consecutive failures. It cycles through up to 9 common profiles (PA/PA → A/PA → P/PA → FA/FA → …) and logs each switch:
+**Runtime auto-switching** (no config needed): every connection attempt includes a bidirectional ping to verify the server→client path works. If it times out (one-way block), or if an established connection drops, the client automatically tries the next well-known combination after 3 consecutive failures. It cycles through up to 9 common profiles (PA/PA → A/PA → P/PA → FA/FA → …) and logs each switch:
 ```
+bidirectional check failed (LF=PA RF=PA): server→client path may be blocked
 auto flag switch: LF=PA RF=PA → LF=A RF=PA (after 3 consecutive failures)
 ```
 
@@ -314,14 +326,22 @@ iptables-save > /etc/iptables/rules.v4
 ## Troubleshooting
 
 1. **Permission denied** — Run with `sudo` or `root`
-2. **Connection times out**:
-   - Did you run `scripts/server-init.sh` (or manual iptables rules) on the server?
-   - Are the `key` values identical on client and server?
-   - Is the server port open in your cloud provider's firewall/security group?
-   - Run `paqet probe` to test connectivity with different flag combinations; the client will also auto-switch flags at runtime after 3 consecutive failures
+
+2. **Connected but no response / one-way traffic**
+   The KCP session establishes but proxied requests never get a reply. Fix in order:
+   - **Run `scripts/client-init.sh SERVER_IP SERVER_PORT`** (Linux) — the client kernel sends RST for every server→client raw packet, which disrupts NAT table entries on the router; the script drops those RSTs before they leave the machine.
+   - **Wrong TCP flags** — run `paqet probe` to find a combo that passes both ways. The client's bidirectional ping check and auto-switcher detect this and try the next combo after 3 failures.
+   - **Server iptables not applied** — re-run `scripts/server-init.sh`; without NOTRACK/RST-DROP the server kernel tears down the raw-socket session.
+
+3. **Connection times out (no KCP handshake at all)**:
+   - Did you run `scripts/server-init.sh` on the server?
+   - Are the `key` values identical on both sides?
+   - Is the server port open in your cloud firewall / security group?
    - Run `paqet dump -p <PORT>` on the server to verify packets are arriving
-3. **`status=203/EXEC`** — Binary is not executable: `chmod +x ./paqet_*`
-4. **High CPU at idle** — Check that iptables NOTRACK rules are applied on the server
+
+4. **`status=203/EXEC`** — Binary is not executable: `chmod +x ./paqet_*`
+
+5. **High CPU at idle** — Ensure iptables NOTRACK rules are applied on the server (`scripts/server-init.sh`)
 
 ## Acknowledgments
 

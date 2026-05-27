@@ -97,6 +97,13 @@ func (fc *flagCycler) Succeed() {
 	fc.mu.Unlock()
 }
 
+// Failures returns the current consecutive failure count for the active combo.
+func (fc *flagCycler) Failures() int {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+	return fc.failures
+}
+
 // parseFlagStr converts a string like "PA" into a single-element []conf.TCPF.
 func parseFlagStr(s string) []conf.TCPF {
 	var f conf.TCPF

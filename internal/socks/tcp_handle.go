@@ -2,6 +2,9 @@ package socks
 
 import (
 	"net"
+	"sync"
+	"time"
+
 	"paqet/internal/flog"
 	"paqet/internal/pkg/buffer"
 
@@ -13,69 +16,91 @@ func (h *Handler) TCPHandle(server *socks5.Server, conn *net.TCPConn, r *socks5.
 		flog.Debugf("SOCKS5 UDP_ASSOCIATE from %s", conn.RemoteAddr())
 		return h.handleUDPAssociate(conn)
 	}
-
 	if r.Cmd == socks5.CmdConnect {
 		flog.Debugf("SOCKS5 CONNECT from %s to %s", conn.RemoteAddr(), r.Address())
 		return h.handleTCPConnect(conn, r)
 	}
-
 	flog.Debugf("unsupported SOCKS5 command %d from %s", r.Cmd, conn.RemoteAddr())
 	return nil
 }
 
 func (h *Handler) handleTCPConnect(conn *net.TCPConn, r *socks5.Request) error {
-	flog.Infof("SOCKS5 accepted TCP connection %s -> %s", conn.RemoteAddr(), r.Address())
-
-	buf := make([]byte, 0, 4+1+255+2) // header + addr + port (max domain length 255)
+	// Build and send SOCKS5 success reply first so the client can start
+	// buffering its request while we open the tunnel stream.
+	buf := make([]byte, 0, 4+1+255+2)
 	buf = append(buf, socks5.Ver)
 	buf = append(buf, socks5.RepSuccess)
-	buf = append(buf, 0x00)
-
-	addr := conn.LocalAddr().(*net.TCPAddr)
-	if ip4 := addr.IP.To4(); ip4 != nil {
+	buf = append(buf, 0x00) // reserved
+	laddr := conn.LocalAddr().(*net.TCPAddr)
+	if ip4 := laddr.IP.To4(); ip4 != nil {
 		buf = append(buf, socks5.ATYPIPv4)
 		buf = append(buf, ip4...)
-	} else if ip6 := addr.IP.To16(); ip6 != nil {
+	} else if ip6 := laddr.IP.To16(); ip6 != nil {
 		buf = append(buf, socks5.ATYPIPv6)
 		buf = append(buf, ip6...)
 	} else {
-		host := addr.IP.String()
+		host := laddr.IP.String()
 		buf = append(buf, socks5.ATYPDomain)
 		buf = append(buf, byte(len(host)))
 		buf = append(buf, host...)
 	}
-	buf = append(buf, byte(addr.Port>>8), byte(addr.Port&0xff))
+	buf = append(buf, byte(laddr.Port>>8), byte(laddr.Port&0xff))
 	if _, err := conn.Write(buf); err != nil {
 		return err
 	}
 
 	strm, err := h.client.TCP(r.Address())
 	if err != nil {
-		flog.Errorf("SOCKS5 failed to establish stream for %s -> %s: %v", conn.RemoteAddr(), r.Address(), err)
+		flog.Errorf("SOCKS5 failed to open tunnel for %s -> %s: %v", conn.RemoteAddr(), r.Address(), err)
 		return err
 	}
-	defer strm.Close()
-	flog.Debugf("SOCKS5 stream %d created for %s -> %s", strm.SID(), conn.RemoteAddr(), r.Address())
+	flog.Infof("SOCKS5 TCP %s -> %s (stream %d)", conn.RemoteAddr(), r.Address(), strm.SID())
+
+	// closeBoth ensures both ends are shut down exactly once regardless of
+	// which goroutine or path triggers the close.
+	var closeOnce sync.Once
+	closeBoth := func() {
+		closeOnce.Do(func() {
+			_ = strm.Close()
+			_ = conn.Close()
+		})
+	}
+	defer closeBoth()
 
 	errCh := make(chan error, 2)
-	go func() {
-		err := buffer.CopyT(conn, strm)
-		errCh <- err
-	}()
-	go func() {
-		err := buffer.CopyT(strm, conn)
-		errCh <- err
-	}()
+	// app → tunnel
+	go func() { errCh <- buffer.CopyT(strm, conn) }()
+	// tunnel → app
+	go func() { errCh <- buffer.CopyT(conn, strm) }()
 
 	select {
 	case err := <-errCh:
-		if err != nil {
-			flog.Errorf("SOCKS5 stream %d failed for %s -> %s: %v", strm.SID(), conn.RemoteAddr(), r.Address(), err)
+		// One direction closed. Shut both ends so the other goroutine
+		// unblocks, then wait for it to exit before returning — this
+		// ensures any data already read from the stream is fully written
+		// to the app connection before we tear down.
+		closeBoth()
+		select {
+		case <-errCh:
+		case <-time.After(2 * time.Second):
+			flog.Debugf("SOCKS5 stream %d drain timeout for %s -> %s", strm.SID(), conn.RemoteAddr(), r.Address())
 		}
+		if err != nil {
+			flog.Debugf("SOCKS5 stream %d for %s -> %s: %v", strm.SID(), conn.RemoteAddr(), r.Address(), err)
+		}
+
 	case <-h.ctx.Done():
-		flog.Debugf("SOCKS5 connection %s -> %s closed due to shutdown", conn.RemoteAddr(), r.Address())
+		closeBoth()
+		select {
+		case <-errCh:
+			select {
+			case <-errCh:
+			case <-time.After(2 * time.Second):
+			}
+		case <-time.After(2 * time.Second):
+		}
 	}
 
-	flog.Debugf("SOCKS5 connection %s -> %s closed", conn.RemoteAddr(), r.Address())
+	flog.Debugf("SOCKS5 TCP %s -> %s closed (stream %d)", conn.RemoteAddr(), r.Address(), strm.SID())
 	return nil
 }

@@ -11,8 +11,10 @@ import (
 // reconnects without holding any global lock so that other goroutines using
 // different connections are not blocked during I/O.
 //
-// Repeated failures advance the timedConn's flagCycler to the next TCP flag
-// combination automatically (see flag_cycler.go).
+// On repeated failures the timedConn's flagCycler advances to the next TCP
+// flag combo automatically (see flag_cycler.go).  The bidirectional ping in
+// createConn() ensures the new combo actually carries traffic both ways before
+// being accepted.
 func (c *Client) newConn() (tnet.Conn, error) {
 	tc := c.iter.Next()
 
@@ -25,13 +27,14 @@ func (c *Client) newConn() (tnet.Conn, error) {
 	tc.mu.Unlock()
 
 	// Reconnect outside the lock so unrelated connections stay usable.
-	lf, rf := tc.cycler.ActiveStrings()
-	flog.Infof("connection lost, reconnecting... (LF=%s RF=%s)", lf, rf)
+	lfStr, rfStr := tc.cycler.ActiveStrings()
+	flog.Infof("connection lost — reconnecting (LF=%s RF=%s, failures=%d/%d)",
+		lfStr, rfStr, tc.cycler.Failures(), maxFlagFailures)
 
 	conn, err := tc.createConn()
 	if err != nil {
-		// Record failure; flagCycler advances combo after maxFlagFailures.
-		tc.cycler.Fail()
+		tc.cycler.Fail() // advances combo after maxFlagFailures
+		flog.Debugf("reconnect failed: %v", err)
 		return nil, fmt.Errorf("reconnect failed: %w", err)
 	}
 	tc.cycler.Succeed()
