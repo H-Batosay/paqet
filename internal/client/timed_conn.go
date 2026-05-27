@@ -73,7 +73,7 @@ func newTimedConn(ctx context.Context, cfg *conf.Conf) (*timedConn, error) {
 
 	flog.Warnf("startup probe: all %d flag combo(s) failed bidirectional check", n)
 	flog.Warnf("  → server→client packets are likely blocked by your OS/NAT sending RST")
-	flog.Warnf("  → FIX: sudo bash scripts/client-init.sh %s", cfg.Server.Addr)
+	flog.Warnf("  → FIX: sudo bash scripts/client-init.sh %s %d", cfg.Server.Addr.IP, cfg.Server.Addr.Port)
 	flog.Warnf("  → starting anyway with LF=%s RF=%s — will work once the rule is applied", lfStr, rfStr)
 
 	conn, err := tc.dialKCPOnly()
@@ -153,16 +153,15 @@ func (tc *timedConn) dialKCPOnly() (tnet.Conn, error) {
 
 // verifyBidirectional sends a ping and waits for the pong within timeout.
 // A timeout indicates the server→client path is blocked.
+//
+// The deadline is set on the individual smux stream, not on the session —
+// smux.Session.SetDeadline does NOT propagate to stream read/write, so
+// setting it on the session would have no effect on Ping's read call.
 func (tc *timedConn) verifyBidirectional(conn tnet.Conn, lfStr, rfStr string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
 	flog.Debugf("verifying bidirectional connectivity (LF=%s RF=%s, timeout %s)", lfStr, rfStr, timeout)
 
-	if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
-		return fmt.Errorf("could not set ping deadline: %w", err)
-	}
-	err := conn.Ping(true)
-	// Always reset deadline regardless of outcome.
-	_ = conn.SetDeadline(time.Time{})
-
+	err := conn.Ping(true, deadline)
 	if err != nil {
 		flog.Warnf("bidirectional check failed (LF=%s RF=%s): server→client path may be blocked — %v", lfStr, rfStr, err)
 		return fmt.Errorf("ping timeout with LF=%s RF=%s (server→client blocked?): %w", lfStr, rfStr, err)

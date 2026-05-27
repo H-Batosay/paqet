@@ -8,7 +8,7 @@ import (
 type Conn interface {
 	OpenStrm() (Strm, error)
 	AcceptStrm() (Strm, error)
-	Ping(wait bool) error
+	Ping(wait bool, deadline time.Time) error
 	IsClosed() bool
 	Close() error
 	LocalAddr() net.Addr

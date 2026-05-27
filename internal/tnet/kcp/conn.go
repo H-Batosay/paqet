@@ -34,13 +34,20 @@ func (c *Conn) AcceptStrm() (tnet.Strm, error) {
 	return &Strm{strm}, nil
 }
 
-func (c *Conn) Ping(wait bool) error {
+// Ping sends a PING to the remote end and, if wait is true, waits for PONG.
+// deadline is applied directly to the stream so that the read actually
+// times out at the specified instant (smux.Session.SetDeadline does not
+// propagate to individual stream I/O).  Pass time.Time{} for no deadline.
+func (c *Conn) Ping(wait bool, deadline time.Time) error {
 	strm, err := c.Session.OpenStream()
 	if err != nil {
 		return fmt.Errorf("ping failed: %v", err)
 	}
 	defer strm.Close()
 	if wait {
+		if !deadline.IsZero() {
+			_ = strm.SetDeadline(deadline)
+		}
 		p := protocol.Proto{Type: protocol.PPING}
 		err = p.Write(strm)
 		if err != nil {
@@ -51,7 +58,7 @@ func (c *Conn) Ping(wait bool) error {
 			return fmt.Errorf("strm ping read failed: %v", err)
 		}
 		if p.Type != protocol.PPONG {
-			return fmt.Errorf("strm pong failed: %v", err)
+			return fmt.Errorf("strm pong failed: expected PPONG, got %v", p.Type)
 		}
 	}
 	return nil

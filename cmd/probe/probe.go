@@ -160,7 +160,7 @@ func testCombo(baseCfg *conf.Conf, combo flagCombo) result {
 	strm.Close()
 
 	start := time.Now()
-	if err := conn.Ping(true); err != nil {
+	if err := conn.Ping(true, time.Now().Add(5*time.Second)); err != nil {
 		r.errMsg = fmt.Sprintf("ping: %v", err)
 		return r
 	}
