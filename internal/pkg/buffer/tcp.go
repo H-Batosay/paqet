@@ -5,8 +5,8 @@ import (
 )
 
 func CopyT(dst io.Writer, src io.Reader) error {
-	buf := make([]byte, TPool)
-
+	buf := GetTBuf()
+	defer PutTBuf(buf)
 	_, err := io.CopyBuffer(dst, src, buf)
 	return err
 }

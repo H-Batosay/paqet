@@ -2,18 +2,17 @@ package client
 
 import (
 	"context"
+
 	"paqet/internal/conf"
 	"paqet/internal/flog"
 	"paqet/internal/pkg/iterator"
 	"paqet/internal/tnet"
-	"sync"
 )
 
 type Client struct {
 	cfg     *conf.Conf
 	iter    *iterator.Iterator[*timedConn]
 	udpPool *udpPool
-	mu      sync.Mutex
 }
 
 func New(cfg *conf.Conf) (*Client, error) {
@@ -35,7 +34,6 @@ func (c *Client) Start(ctx context.Context) error {
 		flog.Debugf("client connection %d created successfully", i+1)
 		c.iter.Items = append(c.iter.Items, tc)
 	}
-	go c.ticker(ctx)
 
 	go func() {
 		<-ctx.Done()

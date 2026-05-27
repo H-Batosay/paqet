@@ -26,7 +26,7 @@ func (s *SOCKS5) Start(ctx context.Context, cfg conf.SOCKS5) error {
 	return nil
 }
 
-func (s *SOCKS5) listen(ctx context.Context, cfg conf.SOCKS5) error {
+func (s *SOCKS5) listen(ctx context.Context, cfg conf.SOCKS5) {
 	listenAddr, _ := net.ResolveTCPAddr("tcp", cfg.Listen.String())
 	server, err := socks5.NewClassicServer(listenAddr.String(), listenAddr.IP.String(), cfg.Username, cfg.Password, 10, 10)
 	if err != nil {
@@ -44,5 +44,4 @@ func (s *SOCKS5) listen(ctx context.Context, cfg conf.SOCKS5) error {
 	if err := server.Shutdown(); err != nil {
 		flog.Debugf("SOCKS5 server shutdown with: %v", err)
 	}
-	return nil
 }

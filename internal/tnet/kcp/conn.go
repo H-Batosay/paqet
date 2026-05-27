@@ -57,6 +57,11 @@ func (c *Conn) Ping(wait bool) error {
 	return nil
 }
 
+// IsClosed reports whether the underlying smux session has been closed.
+func (c *Conn) IsClosed() bool {
+	return c.Session.IsClosed()
+}
+
 func (c *Conn) Close() error {
 	var err error
 	if c.UDPSession != nil {

@@ -22,10 +22,6 @@ var (
 	logCh    = make(chan string, 1024)
 )
 
-func init() {
-
-}
-
 func SetLevel(l int) {
 	minLevel = Level(l)
 	if l != -1 {
@@ -44,8 +40,7 @@ func logf(level Level, format string, args ...any) {
 
 	for _, arg := range args {
 		if err, ok := arg.(error); ok {
-			err = WErr(err)
-			if err == nil {
+			if WErr(err) == nil {
 				return
 			}
 		}
