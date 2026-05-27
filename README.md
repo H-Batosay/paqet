@@ -15,7 +15,8 @@
 
 ```
 [Your App] <------> [paqet Client] <===== Raw TCP Packet =====> [paqet Server] <------> [Target Server]
-(e.g. curl)        (localhost:1080)        (Internet)          (Public IP:PORT)     (e.g. https://httpbin.org)
+ SOCKS5 /          (localhost:1080              (Internet)        (Public IP:PORT)    (e.g. any host)
+ TCP/UDP forward    or :2222 TCP, :5353 UDP …)
 ```
 
 ## Getting Started
@@ -224,6 +225,40 @@ Configs written before the auto-detection feature was added continue to work wit
 The `transport.kcp.block` field selects the encryption cipher. Default: `aes`.
 
 ⚠️ `none` and `null` disable authentication — anyone with your server IP and port can connect.
+
+### Port Forwarding
+
+The `forward` block (client-side only) binds a local port and tunnels all traffic to a fixed remote target through paqet. Both TCP and UDP are supported. Multiple rules can be combined with SOCKS5 in the same config.
+
+```yaml
+forward:
+  # TCP — SSH to the server's own port 22
+  - listen:   "127.0.0.1:2222"
+    target:   "127.0.0.1:22"    # address as seen FROM the server
+    protocol: "tcp"
+
+  # TCP — reach a database on a host behind the server
+  - listen:   "127.0.0.1:5432"
+    target:   "10.0.0.50:5432"
+    protocol: "tcp"
+
+  # UDP — use the server's DNS resolver
+  - listen:   "127.0.0.1:5353"
+    target:   "8.8.8.8:53"
+    protocol: "udp"
+```
+
+Connect to the local port and traffic arrives at `target` as if it came from the server:
+
+```bash
+# After the config above, SSH through paqet:
+ssh -p 2222 user@127.0.0.1
+
+# DNS via paqet:
+dig @127.0.0.1 -p 5353 example.com
+```
+
+`target` is resolved relative to the server — use `127.0.0.1` to reach the server itself, or any IP reachable from the server for onward routing.
 
 ### TCP Flag Cycling
 

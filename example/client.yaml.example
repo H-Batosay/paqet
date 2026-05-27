@@ -11,14 +11,33 @@ transport:
   kcp:
     key: "your-secret-key-here"   # CHANGE ME: must match server key
 
-# ── Choose at least one proxy ───────────────────────────────────
-socks5:
-  - listen: "127.0.0.1:1080"     # SOCKS5 proxy (apps point here)
+# ── Choose at least one proxy or forwarder ──────────────────────
 
+# SOCKS5 proxy — point any app here to tunnel all its traffic
+socks5:
+  - listen: "127.0.0.1:1080"     # SOCKS5 proxy listen address
+  # username: "user"             # Optional auth
+  # password: "pass"
+
+# Port forwarding — bind a local port and pipe it straight to a
+# fixed remote target through the paqet tunnel.
+# Multiple entries are allowed; mix TCP and UDP freely.
+#
 # forward:
-#   - listen: "127.0.0.1:8080"   # Port forwarding (e.g. for SSH)
-#     target: "127.0.0.1:22"
+#   # TCP example: SSH to the server's own port 22
+#   - listen:   "127.0.0.1:2222"
+#     target:   "127.0.0.1:22"     # address as seen FROM the server
 #     protocol: "tcp"
+#
+#   # TCP example: reach a DB on a host behind the server
+#   - listen:   "127.0.0.1:5432"
+#     target:   "10.0.0.50:5432"
+#     protocol: "tcp"
+#
+#   # UDP example: DNS via the server's resolver
+#   - listen:   "127.0.0.1:5353"
+#     target:   "8.8.8.8:53"
+#     protocol: "udp"
 
 # ── Optional: override auto-detected network settings ───────────
 # network:
