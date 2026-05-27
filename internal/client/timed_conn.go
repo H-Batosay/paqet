@@ -28,18 +28,25 @@ type timedConn struct {
 //
 // Startup probe strategy:
 //  1. Try every flag combo in the cycler with a short (2 s) bidirectional ping.
-//     First combo that passes → use it and return.
+//     First combo that passes both-way connectivity → use it and return.
 //  2. If ALL combos fail the ping (server→client path blocked — usually the
 //     client-init.sh RST-DROP rule is missing) → fall back to connecting
 //     WITHOUT ping verification so the process stays alive.  A clear warning
 //     is logged pointing to the fix.
-//  3. Hard-fail only if the server is truly unreachable (KCP dial fails on
-//     every combo).
+//  3. Hard-fail only if the server is truly unreachable (KCP dial fails).
+//
+// After startup a background health-check goroutine continuously pings the
+// connection at the interval configured in network.tcp.health_interval.
 func newTimedConn(ctx context.Context, cfg *conf.Conf) (*timedConn, error) {
 	tc := &timedConn{
-		cfg:    cfg,
-		ctx:    ctx,
-		cycler: newFlagCycler(cfg.Network.TCP.LF, cfg.Network.TCP.RF, cfg.Network.TCP.ExplicitFlags),
+		cfg: cfg,
+		ctx: ctx,
+		cycler: newFlagCycler(
+			cfg.Network.TCP.LF,
+			cfg.Network.TCP.RF,
+			cfg.Network.TCP.ExplicitFlags,
+			cfg.Network.TCP.MaxFailures,
+		),
 	}
 
 	n := tc.cycler.Len()
@@ -65,6 +72,7 @@ func newTimedConn(ctx context.Context, cfg *conf.Conf) (*timedConn, error) {
 		if err = tc.verifyBidirectional(conn, lfStr, rfStr, 2*time.Second); err == nil {
 			flog.Infof("startup probe: working combo found — LF=%s RF=%s", lfStr, rfStr)
 			tc.conn = conn
+			tc.startHealthCheck()
 			return tc, nil
 		}
 		conn.Close()
@@ -86,6 +94,7 @@ func newTimedConn(ctx context.Context, cfg *conf.Conf) (*timedConn, error) {
 		return nil, fmt.Errorf("server unreachable at %s: %w", cfg.Server.Addr, err)
 	}
 	tc.conn = conn
+	tc.startHealthCheck()
 	return tc, nil
 }
 
@@ -174,6 +183,49 @@ func (tc *timedConn) verifyBidirectional(conn tnet.Conn, lfStr, rfStr string, ti
 
 	flog.Debugf("bidirectional OK (LF=%s RF=%s)", lfStr, rfStr)
 	return nil
+}
+
+// startHealthCheck launches a background goroutine that periodically pings
+// the active connection.  If the ping fails the connection is closed and the
+// flag cycler records a failure so the next reconnect tries a different combo.
+// Does nothing when health_interval is 0 (disabled) or negative.
+func (tc *timedConn) startHealthCheck() {
+	interval := tc.cfg.Network.TCP.HealthInterval
+	if interval <= 0 {
+		return
+	}
+	go tc.healthCheckLoop(interval)
+}
+
+func (tc *timedConn) healthCheckLoop(interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-tc.ctx.Done():
+			return
+		case <-ticker.C:
+			tc.mu.Lock()
+			conn := tc.conn
+			tc.mu.Unlock()
+
+			if conn == nil || conn.IsClosed() {
+				// Already dead — newConn() will reconnect when traffic arrives.
+				continue
+			}
+
+			lfStr, rfStr := tc.cycler.ActiveStrings()
+			deadline := time.Now().Add(5 * time.Second)
+			if err := conn.Ping(true, deadline); err != nil {
+				flog.Warnf("health check failed (LF=%s RF=%s): %v — forcing reconnect", lfStr, rfStr, err)
+				tc.cycler.Fail()
+				conn.Close() // marks conn as dead; next newConn() call reconnects
+			} else {
+				flog.Debugf("health check OK (LF=%s RF=%s)", lfStr, rfStr)
+			}
+		}
+	}
 }
 
 // sendTCPF opens a temporary stream and tells the server which TCP flags to

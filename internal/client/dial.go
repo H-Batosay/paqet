@@ -29,7 +29,7 @@ func (c *Client) newConn() (tnet.Conn, error) {
 	// Reconnect outside the lock so unrelated connections stay usable.
 	lfStr, rfStr := tc.cycler.ActiveStrings()
 	flog.Infof("connection lost — reconnecting (LF=%s RF=%s, failures=%d/%d)",
-		lfStr, rfStr, tc.cycler.Failures(), maxFlagFailures)
+		lfStr, rfStr, tc.cycler.Failures(), tc.cycler.MaxFailures())
 
 	conn, err := tc.createConn()
 	if err != nil {

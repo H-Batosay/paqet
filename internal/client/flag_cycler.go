@@ -7,48 +7,74 @@ import (
 	"paqet/internal/flog"
 )
 
-// maxFlagFailures is the number of consecutive connection failures with the
-// current TCP flag combination before the cycler advances to the next one.
-const maxFlagFailures = 3
-
 type flagPair struct{ lf, rf string }
 
 // fallbackCombos is the ordered list of well-known flag pairs tried when the
-// active combo fails.  Covers the most common firewall/NAT profiles.
+// active combo fails.  It covers a wide range of firewall and DPI profiles:
+//
+//   - Established-session patterns (PSH+ACK, ACK): most permissive firewalls
+//   - SYN/SYN-ACK: deep-inspection systems that track connection state
+//   - FIN/FIN-ACK: close-sequence mimicry
+//   - ECN flags (ECE, CWR): some networks allow ECN-flagged traffic selectively
+//   - Mixed asymmetric combos: bypass stateful asymmetric DPI rules
+//
 // Entries that duplicate the user-configured combo are skipped at init time.
 var fallbackCombos = []flagPair{
-	{"PA", "PA"},
-	{"A", "PA"},
-	{"P", "PA"},
-	{"FA", "FA"},
-	{"FA", "PA"},
-	{"S", "SA"},
-	{"SA", "PA"},
-	{"EA", "PA"},
-	{"CA", "PA"},
+	// ── Established-session (ACK-based) ──────────────────────────────────────
+	{"PA", "PA"},   // PSH+ACK / PSH+ACK     — most common data pattern
+	{"A", "PA"},    // ACK     / PSH+ACK     — minimal client, data server
+	{"PA", "A"},    // PSH+ACK / ACK         — data client, minimal server
+	{"A", "A"},     // ACK     / ACK         — keepalive-like, very lightweight
+	{"P", "PA"},    // PSH     / PSH+ACK     — no-ACK push
+
+	// ── SYN / SYN-ACK handshake patterns ────────────────────────────────────
+	{"S", "SA"},    // SYN / SYN-ACK         — clean handshake (stateful-friendly)
+	{"SA", "PA"},   // SYN+ACK / PSH+ACK    — asymmetric: server-first look
+	{"SA", "SA"},   // SYN+ACK / SYN+ACK    — both appear to be accepting
+
+	// ── FIN / close-sequence patterns ────────────────────────────────────────
+	{"FA", "FA"},   // FIN+ACK / FIN+ACK    — graceful close mimicry
+	{"FA", "PA"},   // FIN+ACK / PSH+ACK    — client closing, server still sending
+	{"FA", "A"},    // FIN+ACK / ACK        — client finishing, server ACKing
+	{"PA", "FA"},   // PSH+ACK / FIN+ACK    — data client, server closing
+	{"FPA", "PA"},  // FIN+PSH+ACK / PSH+ACK — unusual but valid combination
+
+	// ── ECN / congestion-control flags ───────────────────────────────────────
+	{"EA", "PA"},   // ECE+ACK / PSH+ACK    — ECN-aware client
+	{"CA", "PA"},   // CWR+ACK / PSH+ACK    — congestion-window reduced
+	{"PA", "EA"},   // PSH+ACK / ECE+ACK    — ECN-aware server
+	{"PA", "CA"},   // PSH+ACK / CWR+ACK
+	{"EA", "EA"},   // ECE+ACK / ECE+ACK    — both ECN
+
+	// ── PSH+ACK / SYN+ACK asymmetric ─────────────────────────────────────────
+	{"PA", "SA"},   // PSH+ACK / SYN+ACK    — looks like data to accepting server
 }
 
 // flagCycler manages automatic TCP flag switching for a single timedConn.
 // It starts with the user-configured combo and falls back to fallbackCombos
-// after maxFlagFailures consecutive connection failures.
+// after maxFailures consecutive connection failures.
 // All methods are safe for concurrent use.
 type flagCycler struct {
-	mu       sync.Mutex
-	combos   []flagPair // ordered list; combos[0] is always the user config
-	idx      int        // currently active combo index
-	failures int        // consecutive failures with the active combo
+	mu          sync.Mutex
+	combos      []flagPair // ordered list; combos[0] is always the user config
+	idx         int        // currently active combo index
+	failures    int        // consecutive failures with the active combo
+	maxFailures int        // failures needed to advance to the next combo
 }
 
 // newFlagCycler returns a cycler whose first entry is the user-configured
 // combo (lf/rf).
 //
-// explicit=true (user set local_flag/remote_flag in the config): only that
-// combo is ever used — no fallback cycling.  The user has made an intentional
+// explicit=true (user set local_flag/remote_flag in config): only that combo
+// is ever used — no fallback cycling.  The user has made an intentional
 // choice; paqet honours it and never switches to another combination.
 //
 // explicit=false (no flags in config, defaults applied): all fallbackCombos
 // are appended after the default so paqet can probe and auto-switch.
-func newFlagCycler(lf, rf []conf.TCPF, explicit bool) *flagCycler {
+//
+// maxFailures is the consecutive failure count before advancing to the next
+// combo (configured via network.tcp.max_failures, default 3).
+func newFlagCycler(lf, rf []conf.TCPF, explicit bool, maxFailures int) *flagCycler {
 	userLF := tcpfToStr(lf)
 	userRF := tcpfToStr(rf)
 
@@ -61,7 +87,7 @@ func newFlagCycler(lf, rf []conf.TCPF, explicit bool) *flagCycler {
 			combos = append(combos, c)
 		}
 	}
-	return &flagCycler{combos: combos}
+	return &flagCycler{combos: combos, maxFailures: maxFailures}
 }
 
 // Active returns the currently active local and remote flag slices.
@@ -80,14 +106,14 @@ func (fc *flagCycler) ActiveStrings() (lf, rf string) {
 	return p.lf, p.rf
 }
 
-// Fail records one connection failure.  Once maxFlagFailures is reached the
+// Fail records one connection failure.  Once maxFailures is reached the
 // cycler advances to the next combo and logs the switch.
 func (fc *flagCycler) Fail() {
 	fc.mu.Lock()
 	defer fc.mu.Unlock()
 
 	fc.failures++
-	if fc.failures < maxFlagFailures {
+	if fc.failures < fc.maxFailures {
 		return
 	}
 	old := fc.combos[fc.idx]
@@ -95,7 +121,7 @@ func (fc *flagCycler) Fail() {
 	fc.failures = 0
 	next := fc.combos[fc.idx]
 	flog.Infof("auto flag switch: LF=%s RF=%s → LF=%s RF=%s (after %d consecutive failures)",
-		old.lf, old.rf, next.lf, next.rf, maxFlagFailures)
+		old.lf, old.rf, next.lf, next.rf, fc.maxFailures)
 }
 
 // Succeed resets the consecutive failure counter without changing the active
@@ -111,6 +137,13 @@ func (fc *flagCycler) Failures() int {
 	fc.mu.Lock()
 	defer fc.mu.Unlock()
 	return fc.failures
+}
+
+// MaxFailures returns the configured failure threshold before auto-switching.
+func (fc *flagCycler) MaxFailures() int {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+	return fc.maxFailures
 }
 
 // Len returns the total number of flag combinations in the rotation.

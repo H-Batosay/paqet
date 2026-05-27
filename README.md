@@ -92,11 +92,14 @@ Generate a secure key with: `./paqet secret`
 
 Some networks block or modify certain TCP flag patterns. `paqet` handles this at two levels:
 
-**Runtime auto-switching** (no config needed): every connection attempt includes a bidirectional ping to verify the server→client path works. If it times out (one-way block), or if an established connection drops, the client automatically tries the next well-known combination after 3 consecutive failures. It cycles through up to 9 common profiles (PA/PA → A/PA → P/PA → FA/FA → …) and logs each switch:
+**Runtime auto-switching** (no config needed): at startup paqet tests every well-known flag combination with a short bidirectional ping and uses the first one that passes both ways. While running, a background health-check goroutine continuously pings the active connection every 30 seconds. If the ping fails, or if an established connection drops, the client automatically tries the next combination after 3 consecutive failures. It cycles through 19 built-in profiles covering ACK-based, SYN/SYN-ACK, FIN, ECN, and asymmetric patterns, and logs each switch:
 ```
 bidirectional check failed (LF=PA RF=PA): server→client path may be blocked
 auto flag switch: LF=PA RF=PA → LF=A RF=PA (after 3 consecutive failures)
+health check failed (LF=A RF=PA): <error> — forcing reconnect
 ```
+
+The retry count and health-check interval are configurable (see [Configuration Reference](#configuration-reference)).
 
 **Probe tool** (optimal setup): run once to find the fastest combination for your specific network path before deployment:
 
@@ -276,10 +279,24 @@ dig @127.0.0.1 -p 5353 example.com
 
 `network.tcp.local_flag` and `network.tcp.remote_flag` set the TCP flags used when crafting raw packets.
 
-- **Auto-switching**: if the active combination fails 3 times in a row, the client automatically rotates to the next well-known combo and logs the change. No restart required.
+- **Auto-switching**: when these fields are **not** set, paqet probes all 19 built-in flag combinations at startup with a 2-second bidirectional ping and picks the first one that works. After startup, a background goroutine pings the active connection every 30 seconds; if the ping fails the cycler records a failure. Once `max_failures` consecutive failures accumulate (default: 3), the client automatically rotates to the next combo and logs the change. No restart required.
+
+- **Explicit flags**: when `local_flag` / `remote_flag` **are** set, paqet honours that choice unconditionally — the auto-cycler is disabled entirely. Use `paqet probe` to find the best combination first, then hard-code it.
+
 - **Probe tool**: run `paqet probe` to benchmark all combinations up-front and find the fastest one for your network path.
 
-If neither field is set, paqet defaults to `PA/PA` and auto-switches as needed.
+#### Tuning the auto-switcher
+
+```yaml
+network:
+  tcp:
+    max_failures: 3      # failures before switching to next combo (default: 3, min: 1)
+    health_interval: 30  # seconds between background pings (default: 30; -1 = disabled)
+```
+
+Reduce `max_failures` to `1` for aggressive probing (switches immediately on any failure). Set `health_interval: -1` to disable the health-check goroutine entirely (relies on traffic-path failures alone to drive switching).
+
+If neither flag field is set, paqet defaults to `PA/PA` and auto-switches as needed.
 
 ## Server Firewall (Manual Setup)
 

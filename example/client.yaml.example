@@ -47,8 +47,18 @@ socks5:
 #     addr: "192.168.1.100:0"    # Auto-detected; :0 = random port
 #     router_mac: "aa:bb:cc:dd:ee:ff"  # Auto-detected via ARP
 #   tcp:
-#     local_flag:  ["PA"]        # Run: paqet probe -c config.yaml  to find best flags
-#     remote_flag: ["PA"]
+#     # TCP flag override — run: paqet probe -c config.yaml  to find the best combo.
+#     # When set, paqet uses ONLY these flags and never auto-switches to another combo.
+#     # When omitted, paqet probes all built-in combos at startup and auto-switches
+#     # on repeated failures.
+#     local_flag:  ["PA"]        # Flags for client → server packets (default: PA)
+#     remote_flag: ["PA"]        # Flags the server puts on server → client packets
+#
+#     # Auto-switch tuning (only relevant when local_flag/remote_flag are NOT set)
+#     max_failures: 3            # Consecutive failures before switching to next combo
+#                                # (default: 3; minimum: 1)
+#     health_interval: 30        # Seconds between background ping health-checks
+#                                # (default: 30; set to -1 to disable health checks)
 
 # ── Optional: logging ───────────────────────────────────────────
 # log:

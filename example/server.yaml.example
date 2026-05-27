@@ -20,6 +20,8 @@ transport:
 #     router_mac: "aa:bb:cc:dd:ee:ff"  # Auto-detected via ARP
 #   tcp:
 #     local_flag: ["PA"]          # TCP flags for server → client packets
+#     health_interval: 30         # Seconds between background health-check pings
+#                                 # (default: 30; set to -1 to disable)
 
 # ── Optional: logging ───────────────────────────────────────────
 # log:
