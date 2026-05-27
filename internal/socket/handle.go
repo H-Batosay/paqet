@@ -30,12 +30,21 @@ func newHandle(cfg *conf.Network) (*pcap.Handle, error) {
 	if err = inactive.SetSnapLen(65536); err != nil {
 		return nil, fmt.Errorf("failed to set pcap snap length: %v", err)
 	}
-	if err = inactive.SetPromisc(true); err != nil {
-		return nil, fmt.Errorf("failed to enable promiscuous mode: %v", err)
+	// Promiscuous mode is NOT needed: we only want packets addressed to this
+	// host.  Enabling it forces the NIC driver to deliver every frame on the
+	// wire through the BPF filter (all hosts' traffic), which burns CPU even
+	// when our port is completely idle.  Normal unicast traffic destined for
+	// our IP always arrives with our MAC as the Ethernet destination, so
+	// promisc=false captures everything we care about.
+	if err = inactive.SetPromisc(false); err != nil {
+		return nil, fmt.Errorf("failed to set promiscuous mode: %v", err)
 	}
 	// IMPORTANT: Do not block forever. A finite timeout lets ReadPacketData wake up
 	// so callers can observe ctx cancellation / deadlines and exit cleanly.
-	if err = inactive.SetTimeout(100 * time.Millisecond); err != nil {
+	// ImmediateMode(true) is set below, so real packets are delivered instantly
+	// regardless of this value — it only controls the idle wakeup frequency.
+	// 1 s → 1 goroutine wake-up/sec per handle at idle (vs. 10/sec at 100 ms).
+	if err = inactive.SetTimeout(1000 * time.Millisecond); err != nil {
 		return nil, fmt.Errorf("failed to set pcap timeout: %v", err)
 	}
 	if err = inactive.SetImmediateMode(true); err != nil {
