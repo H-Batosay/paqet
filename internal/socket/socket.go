@@ -3,6 +3,7 @@ package socket
 import (
 	"context"
 	"fmt"
+	"io"
 	"math/rand"
 	"net"
 	"os"
@@ -11,18 +12,23 @@ import (
 	"time"
 )
 
+// recvPacket holds a decoded packet forwarded from recvLoop.
+type recvPacket struct {
+	data []byte
+	addr net.Addr
+}
+
 type PacketConn struct {
 	cfg           *conf.Network
 	sendHandle    *SendHandle
 	recvHandle    *RecvHandle
 	readDeadline  atomic.Value
 	writeDeadline atomic.Value
-
-	ctx    context.Context
-	cancel context.CancelFunc
+	ctx           context.Context
+	cancel        context.CancelFunc
+	recvCh        chan recvPacket // packets dispatched by recvLoop
 }
 
-// &OpError{Op: "listen", Net: network, Source: nil, Addr: nil, Err: err}
 func New(ctx context.Context, cfg *conf.Network) (*PacketConn, error) {
 	if cfg.Port == 0 {
 		cfg.Port = 32768 + rand.Intn(32768)
@@ -45,41 +51,74 @@ func New(ctx context.Context, cfg *conf.Network) (*PacketConn, error) {
 		recvHandle: recvHandle,
 		ctx:        ctx,
 		cancel:     cancel,
+		recvCh:     make(chan recvPacket, 64), // absorbs short bursts
 	}
-
+	go conn.recvLoop()
 	return conn, nil
 }
 
-func (c *PacketConn) ReadFrom(data []byte) (n int, addr net.Addr, err error) {
-	var d time.Time
-	if dd, ok := c.readDeadline.Load().(time.Time); ok {
-		d = dd
-	}
-
+// recvLoop runs in its own goroutine and owns all pcap I/O.
+// It forwards matched packets to recvCh so that ReadFrom can block
+// on a pure-Go select instead of a kernel/CGO call.  This means the
+// kcp-go goroutine sits in Go's scheduler (zero CPU, zero syscalls)
+// and is woken only when a real packet arrives or ctx is cancelled —
+// no idle polling at all on the consumer side.
+//
+// ReadPacketData allocates a fresh []byte per call, so the payload
+// subslice stays valid until the GC reclaims it.  No extra copy is needed.
+func (c *PacketConn) recvLoop() {
+	defer close(c.recvCh)
 	for {
-		select {
-		case <-c.ctx.Done():
-			return 0, nil, c.ctx.Err()
-		default:
-		}
-		if !d.IsZero() && time.Now().After(d) {
-			return 0, nil, os.ErrDeadlineExceeded
-		}
-
-		payload, raddr, err := c.recvHandle.Read()
+		payload, addr, err := c.recvHandle.Read()
 		if err != nil {
-			return 0, nil, err
+			return // fatal pcap error; ReadFrom will observe io.EOF
 		}
-		if payload == nil || raddr == nil {
-			// pcap timeout (or non-matching/partial frame) — keep waiting.
-			// No sleep needed: SetTimeout(1s)+ImmediateMode(true) means
-			// ReadPacketData already blocks for up to 1s when there is nothing
-			// to read, so there is no tight-spin risk here.
+		if payload == nil {
+			// pcap idle timeout — no matching packet arrived.
+			// Check for shutdown before re-entering ReadPacketData.
+			select {
+			case <-c.ctx.Done():
+				return
+			default:
+			}
 			continue
 		}
+		select {
+		case c.recvCh <- recvPacket{data: payload, addr: addr}:
+		case <-c.ctx.Done():
+			return
+		}
+	}
+}
 
-		n = copy(data, payload)
-		return n, raddr, nil
+// ReadFrom blocks until a packet is available, the context is cancelled,
+// or the read deadline expires.  It never polls; it waits in a single select.
+func (c *PacketConn) ReadFrom(data []byte) (n int, addr net.Addr, err error) {
+	// A nil channel is never selected, so deadlineCh == nil means
+	// the deadline case is simply skipped — no special-casing needed.
+	var deadlineCh <-chan time.Time
+	if d, ok := c.readDeadline.Load().(time.Time); ok && !d.IsZero() {
+		rem := time.Until(d)
+		if rem <= 0 {
+			return 0, nil, os.ErrDeadlineExceeded
+		}
+		t := time.NewTimer(rem)
+		defer t.Stop()
+		deadlineCh = t.C
+	}
+
+	select {
+	case <-c.ctx.Done():
+		return 0, nil, c.ctx.Err()
+	case <-deadlineCh:
+		return 0, nil, os.ErrDeadlineExceeded
+	case pkt, ok := <-c.recvCh:
+		if !ok {
+			// recvLoop exited (fatal pcap error or shutdown).
+			return 0, nil, io.EOF
+		}
+		n = copy(data, pkt.data)
+		return n, pkt.addr, nil
 	}
 }
 
@@ -128,11 +167,6 @@ func (c *PacketConn) Close() error {
 
 func (c *PacketConn) LocalAddr() net.Addr {
 	return nil
-	// return &net.UDPAddr{
-	// 	IP:   append([]byte(nil), c.cfg.PrimaryAddr().IP...),
-	// 	Port: c.cfg.PrimaryAddr().Port,
-	// 	Zone: c.cfg.PrimaryAddr().Zone,
-	// }
 }
 
 func (c *PacketConn) SetDeadline(t time.Time) error {
