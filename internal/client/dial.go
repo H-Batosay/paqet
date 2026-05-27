@@ -7,9 +7,12 @@ import (
 	"paqet/internal/tnet"
 )
 
-// newConn returns the next live connection.  If the smux session is closed,
-// it reconnects without holding any global lock so that other goroutines using
+// newConn returns the next live connection.  If the smux session is closed it
+// reconnects without holding any global lock so that other goroutines using
 // different connections are not blocked during I/O.
+//
+// Repeated failures advance the timedConn's flagCycler to the next TCP flag
+// combination automatically (see flag_cycler.go).
 func (c *Client) newConn() (tnet.Conn, error) {
 	tc := c.iter.Next()
 
@@ -22,11 +25,16 @@ func (c *Client) newConn() (tnet.Conn, error) {
 	tc.mu.Unlock()
 
 	// Reconnect outside the lock so unrelated connections stay usable.
-	flog.Infof("connection lost, reconnecting...")
+	lf, rf := tc.cycler.ActiveStrings()
+	flog.Infof("connection lost, reconnecting... (LF=%s RF=%s)", lf, rf)
+
 	conn, err := tc.createConn()
 	if err != nil {
+		// Record failure; flagCycler advances combo after maxFlagFailures.
+		tc.cycler.Fail()
 		return nil, fmt.Errorf("reconnect failed: %w", err)
 	}
+	tc.cycler.Succeed()
 
 	tc.mu.Lock()
 	if tc.conn.IsClosed() {

@@ -2,9 +2,13 @@ package conf
 
 import (
 	"fmt"
+	"net"
 	"os"
+	"paqet/internal/autoconf"
 	"paqet/internal/flog"
+	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/goccy/go-yaml"
@@ -55,9 +59,66 @@ func (c *Conf) setDefaults() {
 	for i := range c.Forward {
 		c.Forward[i].setDefaults()
 	}
+	// Auto-detect network before Network.setDefaults so that detected values
+	// are available for the rest of the config initialisation.
+	c.autoDetectNetwork()
 	c.Network.setDefaults(c.Role)
 	c.Server.setDefaults()
 	c.Transport.setDefaults(c.Role)
+}
+
+// autoDetectNetwork fills in missing Network fields by probing the OS.
+// It only touches fields that are empty in the YAML config so explicit
+// user values are never overridden.
+func (c *Conf) autoDetectNetwork() {
+	needInterface := c.Network.Interface_ == ""
+	needIPv4 := c.Network.IPv4.Addr_ == ""
+	needMac := c.Network.IPv4.RouterMac_ == ""
+	needGUID := runtime.GOOS == "windows" && c.Network.GUID == ""
+
+	if !needInterface && !needIPv4 && !needMac && !needGUID {
+		return
+	}
+
+	// Use server address as routing hint on the client so we probe the
+	// correct outgoing interface.  Fall back to a public address for the
+	// server role.
+	hint := "8.8.8.8:53"
+	if c.Role == "client" && c.Server.Addr_ != "" {
+		hint = c.Server.Addr_
+	}
+
+	info, err := autoconf.Detect(hint)
+	if err != nil {
+		flog.Debugf("network auto-detect skipped: %v", err)
+		return
+	}
+
+	if needInterface && info.Interface != "" {
+		flog.Infof("auto-detect: interface = %s", info.Interface)
+		c.Network.Interface_ = info.Interface
+	}
+	if needGUID && info.GUID != "" {
+		flog.Infof("auto-detect: guid = %s", info.GUID)
+		c.Network.GUID = info.GUID
+	}
+	if needIPv4 && info.IPv4 != nil {
+		port := 0 // client: random ephemeral port
+		if c.Role == "server" && c.Listen.Addr_ != "" {
+			// Extract port from listen address string (e.g. ":9999" → 9999)
+			if _, portStr, err := net.SplitHostPort(c.Listen.Addr_); err == nil {
+				if p, err := strconv.Atoi(portStr); err == nil {
+					port = p
+				}
+			}
+		}
+		c.Network.IPv4.Addr_ = fmt.Sprintf("%s:%d", info.IPv4, port)
+		flog.Infof("auto-detect: ipv4 = %s", c.Network.IPv4.Addr_)
+	}
+	if needMac && info.IPv4RouterMAC != nil {
+		flog.Infof("auto-detect: router_mac = %s", info.IPv4RouterMAC)
+		c.Network.IPv4.RouterMac_ = info.IPv4RouterMAC.String()
+	}
 }
 
 func (c *Conf) validate() error {

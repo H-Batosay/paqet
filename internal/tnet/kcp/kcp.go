@@ -20,7 +20,10 @@ func aplConf(conn *kcp.UDPSession, cfg *conf.KCP) {
 	case "fast2":
 		noDelay, interval, resend, noCongestion = 1, 20, 2, 1
 		wDelay, ackNoDelay = false, true
-	case "fast3":
+	case "fast3", "auto":
+		noDelay, interval, resend, noCongestion = 1, 10, 2, 1
+		wDelay, ackNoDelay = false, true
+	case "turbo":
 		noDelay, interval, resend, noCongestion = 1, 10, 2, 1
 		wDelay, ackNoDelay = false, true
 	case "manual":

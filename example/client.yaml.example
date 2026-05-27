@@ -1,105 +1,48 @@
-# paqet Client Configuration Example
-# Role must be explicitly set
+# paqet Client Configuration
+# Minimal required config — network settings are auto-detected.
 role: "client"
 
-# Logging configuration
-log:
-  level: "info"  # none, debug, info, warn, error, fatal
-
-# SOCKS5 proxy configuration (client mode)
-socks5:
-  - listen: "127.0.0.1:1080"    # SOCKS5 proxy listen address
-    username: ""                # Optional SOCKS5 authentication
-    password: ""                # Optional SOCKS5 authentication
-
-# Port forwarding configuration (can be used alongside SOCKS5)
-# forward:
-#   - listen: "127.0.0.1:8080"  # Local port to listen on
-#     target: "127.0.0.1:80"    # Target to forward to (via server)
-#     protocol: "tcp"           # Protocol (tcp/udp)
-
-# Network interface settings
-network:
-  interface: "en0"                          # CHANGE ME: Network interface (en0, eth0, wlan0, etc.)
-  # guid: "\Device\NPF_{...}"               # Windows only (Npcap).
-
-  # IPv4 configuration
-  ipv4:
-    addr: "192.168.1.100:0"                 # CHANGE ME: Local IP (use port 0 for random port)
-    router_mac: "aa:bb:cc:dd:ee:ff"         # CHANGE ME: Gateway/router MAC address
-
-  # IPv6 configuration (optional)
-  ipv6:
-    addr: "[2001:db8::1]:0"                 # CHANGE ME: Local IPv6 address and port (optional)
-    router_mac: "aa:bb:cc:dd:ee:ff"         # CHANGE ME: Gateway/router MAC address for IPv6
-
-  tcp:
-    local_flag: ["PA"]                      # Local TCP flags (Push+Ack default)
-    remote_flag: ["PA"]                     # Remote TCP flags (Push+Ack default)
-
-  # PCAP settings (optional - will use defaults)
-  # pcap:
-    # sockbuf: 4194304                        # 4MB buffer (default for client)
-
-# Server connection settings
+# ── Required ────────────────────────────────────────────────────
 server:
-  addr: "10.0.0.100:9999"  # CHANGE ME: paqet server address and port
+  addr: "SERVER_IP:9999"          # CHANGE ME: paqet server address and port
 
-# Transport protocol configuration
 transport:
-  protocol: "kcp"  # Transport protocol (currently only "kcp" supported)
-  conn: 1          # Number of connections (1-256, default: 1)
-  
-  # tcpbuf: 8192   # TCP buffer size in bytes
-  # udpbuf: 4096   # UDP buffer size in bytes
-
-  # KCP protocol settings
+  protocol: "kcp"
   kcp:
-    mode: "fast"              # KCP mode: normal, fast, fast2, fast3, manual
+    key: "your-secret-key-here"   # CHANGE ME: must match server key
 
-    # Manual mode parameters (only used when mode="manual")
-    # nodelay: 1              # 0=disable, 1=enable
-                              # Enable for lower latency & aggressive retransmission
-                              # Disable for TCP-like conservative behavior
-                  
-    # interval: 10            # Internal update timer interval in milliseconds (10-5000ms)
-                              # Lower values increase responsiveness but raise CPU usage
+# ── Choose at least one proxy ───────────────────────────────────
+socks5:
+  - listen: "127.0.0.1:1080"     # SOCKS5 proxy (apps point here)
 
-    # resend: 2               # Fast retransmit trigger (0-2)
-                              # 0 = disabled (wait for timeout only)
-                              # 1 = most aggressive (retransmit after 1 ACK skip)
-                              # 2 = aggressive (retransmit after 2 ACK skips)
+# forward:
+#   - listen: "127.0.0.1:8080"   # Port forwarding (e.g. for SSH)
+#     target: "127.0.0.1:22"
+#     protocol: "tcp"
 
-    # nocongestion: 1         # Congestion control: 0=enabled, 1=disabled
-                              # 0 = TCP-like fair congestion control (slow start, congestion avoidance)
-                              # 1 = disable congestion control for maximum speed
+# ── Optional: override auto-detected network settings ───────────
+# network:
+#   interface: "eth0"             # Auto-detected from routing table
+#   # guid: "\Device\NPF_{...}"  # Windows only — auto-detected from Npcap
+#   ipv4:
+#     addr: "192.168.1.100:0"    # Auto-detected; :0 = random port
+#     router_mac: "aa:bb:cc:dd:ee:ff"  # Auto-detected via ARP
+#   tcp:
+#     local_flag:  ["PA"]        # Run: paqet probe -c config.yaml  to find best flags
+#     remote_flag: ["PA"]
 
-    # wdelay: false           # Write batching behavior
-                              # false = flush immediately (low latency, recommended for real-time)
-                              # true = batch writes until next update interval (higher throughput)
-                              # Controls when data is actually sent to the network
+# ── Optional: logging ───────────────────────────────────────────
+# log:
+#   level: "info"                 # none, debug, info, warn, error, fatal
 
-    # acknodelay: true        # ACK sending behavior
-                              # true = send ACKs immediately when packets are received (lower latency)
-                              # false = batch ACKs (more bandwidth efficient)
-                              # Setting true reduces latency but increases bandwidth usage
-
-    # mtu: 1350              # Maximum transmission unit (50-1500)
-    # rcvwnd: 512            # Receive window size (default for client)  
-    # sndwnd: 512            # Send window size (default for client)
-
-    # Encryption settings
-    # block: "aes"                    # Encryption: aes, aes-128, aes-128-gcm, aes-192, salsa20, blowfish, twofish, cast5, 3des, tea, xtea, xor, sm4, none, null.
-    key: "your-secret-key-here"       # CHANGE ME: Secret key (must match server)
-
-    # Buffer settings (optional)
-    # smuxbuf: 4194304       # 4MB SMUX buffer
-    # streambuf: 2097152     # 2MB stream buffer
-    
-    # smuxkalive: 2       # SMUX keepalive interval (seconds)
-    # smuxktimeout: 8     # SMUX keepalive timeout (seconds)
-
-# Optional Forward Error Correction (FEC) - currently disabled
-# Use these only if you need FEC for very lossy networks:
-#   dshard: 10    # Data shards for FEC
-#   pshard: 3     # Parity shards for FEC
+# ── Optional: KCP tuning ────────────────────────────────────────
+# transport:
+#   conn: 1                       # Number of parallel connections
+#   kcp:
+#     mode: "auto"                # auto (default), normal, fast, fast2, fast3, turbo, manual
+#     # block: "aes"              # Encryption: aes, aes-128, salsa20, xor, none, null
+#     # mtu: 1350
+#     # rcvwnd: 512
+#     # sndwnd: 512
+#     # smuxkalive: 10            # Keep-alive interval (seconds)
+#     # smuxktimeout: 30          # Keep-alive timeout (seconds)

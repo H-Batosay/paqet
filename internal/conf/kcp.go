@@ -60,12 +60,15 @@ func (k *KCP) setDefaults(role string) {
 		}
 	}
 
-	// if k.Dshard == 0 {
-	// 	k.Dshard = 10
-	// }
-	// if k.Pshard == 0 {
-	// 	k.Pshard = 3
-	// }
+	// "auto" and "turbo" use fast3 internals; set dshard/pshard for turbo
+	if k.Mode == "turbo" {
+		if k.Dshard == 0 {
+			k.Dshard = 10
+		}
+		if k.Pshard == 0 {
+			k.Pshard = 3
+		}
+	}
 
 	if k.Block_ == "" {
 		k.Block_ = "aes"
@@ -89,7 +92,7 @@ func (k *KCP) setDefaults(role string) {
 func (k *KCP) validate() []error {
 	var errors []error
 
-	validModes := []string{"normal", "fast", "fast2", "fast3", "manual"}
+	validModes := []string{"normal", "fast", "fast2", "fast3", "auto", "turbo", "manual"}
 	if !slices.Contains(validModes, k.Mode) {
 		errors = append(errors, fmt.Errorf("KCP mode must be one of: %v", validModes))
 	}

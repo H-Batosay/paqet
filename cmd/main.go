@@ -5,6 +5,7 @@ import (
 	"paqet/cmd/dump"
 	"paqet/cmd/iface"
 	"paqet/cmd/ping"
+	"paqet/cmd/probe"
 	"paqet/cmd/run"
 	"paqet/cmd/secret"
 	"paqet/cmd/version"
@@ -23,6 +24,7 @@ func main() {
 	rootCmd.AddCommand(run.Cmd)
 	rootCmd.AddCommand(dump.Cmd)
 	rootCmd.AddCommand(ping.Cmd)
+	rootCmd.AddCommand(probe.Cmd)
 	rootCmd.AddCommand(secret.Cmd)
 	rootCmd.AddCommand(iface.Cmd)
 	rootCmd.AddCommand(version.Cmd)
