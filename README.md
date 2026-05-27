@@ -151,6 +151,62 @@ Full configuration options are documented in the example files:
 - [`example/client.yaml.example`](example/client.yaml.example)
 - [`example/server.yaml.example`](example/server.yaml.example)
 
+### Auto-Detection vs Explicit Config
+
+paqet has two configuration modes that coexist transparently:
+
+**Minimal mode** (new users): omit any `network` fields and paqet auto-detects everything from the OS routing table at startup — interface name, local IP, router MAC, and (on Windows) the Npcap device GUID.
+
+**Explicit mode** (pro users / locked-down setups): set any or all `network` fields in the YAML. Every field you provide is used verbatim; auto-detection is skipped **for that field only**. If you set all four fields, the OS is never probed at all.
+
+The rule is simple: **any field present in the config wins; missing fields are filled in automatically.**
+
+```yaml
+# Pro / advanced client config — every network field set explicitly.
+# Auto-detection is completely bypassed for all fields below.
+role: "client"
+server:
+  addr: "203.0.113.10:9999"
+
+network:
+  interface: "eth0"
+  # guid: "\Device\NPF_{XXXXXXXX-...}"  # Windows only
+  ipv4:
+    addr: "10.0.0.5:32100"         # fixed source IP and port
+    router_mac: "aa:bb:cc:dd:ee:ff"
+  ipv6:                             # optional second address family
+    addr: "[2001:db8::1]:32100"
+    router_mac: "aa:bb:cc:dd:ee:ff"
+  tcp:
+    local_flag:  ["PA", "A"]       # round-robins between PA and A
+    remote_flag: ["PA"]
+  pcap:
+    sockbuf: 16777216               # 16 MB capture buffer
+
+transport:
+  protocol: "kcp"
+  conn: 4                           # four parallel KCP sessions
+  kcp:
+    key: "your-secret-key"
+    mode: "turbo"
+    block: "aes-128"
+    mtu: 1350
+    sndwnd: 1024
+    rcvwnd: 1024
+    dshard: 10
+    pshard: 3
+
+socks5:
+  - listen: "0.0.0.0:1080"
+    username: "user"
+    password: "pass"
+
+log:
+  level: "debug"
+```
+
+Configs written before the auto-detection feature was added continue to work without any changes.
+
 ### KCP Modes
 
 | Mode     | Description                                          | Use case                    |
